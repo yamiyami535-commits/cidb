@@ -22,33 +22,63 @@ async function freePort(){const s=net.createServer();s.listen(0,'127.0.0.1');awa
  const db=await PGlite.create({extensions:{pgcrypto}});
  const dbPort=await freePort();
  const socket=new PGLiteSocketServer({db,host:'127.0.0.1',port:dbPort});
- let app,logs='',cookie='';const submissions=[];
+ let app,logs='',cookie='',ocrMode='response';const submissions=[],ocrCalls=[],ocrResults=[];
  const bot=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{
    submissions.push(JSON.parse(body));res.writeHead(200,{'Content-Type':'application/json'});res.end('{"status":"inserted"}');
  });});
+ const ocr=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{
+   ocrCalls.push({headers:req.headers,body});
+   if(ocrMode==='timeout'){setTimeout(()=>{if(!res.destroyed){res.writeHead(200,{'Content-Type':'application/json'});res.end('{"verified":true,"status":"VERIFIED","message":"late"}');}},1500);return;}
+   if(ocrMode==='unavailable'){res.destroy();return;}
+   const result=ocrResults.shift()||{http:200,body:{verified:true,status:'VERIFIED',message:'Verified',document_type:'mykad',extracted_document_number_masked:'******-**-1234',extracted_text_lines:['PRIVATE FULL OCR TEXT'],processed_images:[{data_url:'PRIVATE BASE64'}]}};
+   res.writeHead(result.http,{'Content-Type':'application/json'});res.end(JSON.stringify(result.body));
+ });});
  try {
    await db.exec(fs.readFileSync(path.join(root,'database/schema.sql'),'utf8').replace(/^\\ir .*$/gm,''));
+   await db.exec(fs.readFileSync(path.join(root,'database/migrations/20261019_ocr_verifications.sql'),'utf8'));
    await db.exec("ALTER TABLE portal_requests ADD COLUMN request_source varchar(8) NOT NULL DEFAULT 'form'");
    const hashed=spawnSync(php,['-r','echo password_hash($argv[1], PASSWORD_DEFAULT);','local-fixture-password'],{encoding:'utf8',windowsHide:true});
    if(hashed.error)throw hashed.error;
    assert.equal(hashed.status,0,hashed.stderr);
    const user=(await db.query('INSERT INTO portal_users(username,email,password_hash) VALUES ($1,$2,$3) RETURNING id',['fixture','fixture@example.test',hashed.stdout])).rows[0];
-   await socket.start();bot.listen(0,'127.0.0.1');await once(bot,'listening');
+   await socket.start();bot.listen(0,'127.0.0.1');await once(bot,'listening');ocr.listen(0,'127.0.0.1');await once(ocr,'listening');
    // Copy only application files, never the actual .env or existing sessions.
    for(const dir of ['src','public','views'])fs.cpSync(path.join(root,dir),path.join(temp,dir),{recursive:true});
    fs.mkdirSync(path.join(temp,'sessions'));
    fs.writeFileSync(path.join(temp,'.env'),[
      'DB_HOST=127.0.0.1',`DB_PORT=${dbPort}`,'DB_DATABASE=postgres','DB_USERNAME=postgres','DB_PASSWORD=',
-     'SESSION_SECURE_COOKIE=false',`RPA_BOT_ENDPOINT=http://127.0.0.1:${bot.address().port}/mock`,'RPA_BOT_API_KEY=fixture-only','EMAIL_ENABLED=false'
+     'SESSION_SECURE_COOKIE=false',`RPA_BOT_ENDPOINT=http://127.0.0.1:${bot.address().port}/mock`,'RPA_BOT_API_KEY=fixture-only',
+     'OCR_RPA_API_KEY=fixture-ocr-key',`OCR_SERVICE_URL=http://127.0.0.1:${ocr.address().port}/api/verify-document`,'OCR_TIMEOUT_MS=1000','OCR_CONNECT_TIMEOUT_MS=1000','OCR_MAX_FILE_SIZE_MB=8','OCR_MAX_REQUEST_SIZE_MB=17','APP_ENV=local','EMAIL_ENABLED=false'
    ].join('\n'));
    const port=await freePort(),origin=`http://127.0.0.1:${port}`;
-   app=spawn(php,['-d',`session.save_path="${path.join(temp,'sessions').replaceAll('\\','/')}"`,'-S',`127.0.0.1:${port}`,'-t','public','public/index.php'],{cwd:temp,windowsHide:true,stdio:['ignore','pipe','pipe']});
+   app=spawn(php,['-d',`session.save_path="${path.join(temp,'sessions').replaceAll('\\','/')}"`,'-d','upload_max_filesize=10M','-d','post_max_size=18M','-S',`127.0.0.1:${port}`,'-t','public','public/index.php'],{cwd:temp,windowsHide:true,stdio:['ignore','pipe','pipe']});
    app.stdout.on('data',b=>logs+=b);app.stderr.on('data',b=>logs+=b);
    let started=false;
    for(let i=0;i<60;i++){try{await fetch(origin+'/login');started=true;break;}catch{await new Promise(r=>setTimeout(r,100));}}
    assert.ok(started,'PHP server started');
    async function request(url,form){const response=await fetch(origin+url,{redirect:'manual',method:form?'POST':'GET',headers:{...(cookie?{Cookie:cookie}:{}),...(form?{'Content-Type':'application/x-www-form-urlencoded'}:{})},body:form?new URLSearchParams(form):undefined});const set=response.headers.get('set-cookie');if(set)cookie=set.split(';')[0];return {response,text:await response.text()};}
    const field=(html,name)=>{const m=html.match(new RegExp(`name="${name}" value="([^"]+)"`));assert.ok(m,`Field ${name}`);return m[1];};
+   async function ocrRequest(form,key='fixture-ocr-key') {const response=await fetch(origin+'/api/ocr/verify-document',{method:'POST',headers:key?{'X-API-Key':key}:{},body:form});return {response,body:await response.json()};}
+   const image=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p7sAAAAASUVORK5CYII=','base64');
+   function mykadForm(){const form=new FormData();form.set('document_type','mykad');form.set('entered_name','Fixture Person');form.set('entered_nric','900101-10-1234');form.set('mykad_front',new Blob([image],{type:'image/png'}),'front.png');form.set('mykad_back',new Blob([image],{type:'image/png'}),'back.png');return form;}
+   function passportForm(){const form=new FormData();form.set('document_type','passport');form.set('entered_name','Fixture Person');form.set('entered_passport_number','A12345678');form.set('passport_image',new Blob([image],{type:'image/png'}),'passport.png');return form;}
+   let ocrResult=await ocrRequest(mykadForm(),'wrong-key');assert.equal(ocrResult.response.status,401);assert.equal(ocrCalls.length,0,'Unauthorized calls never reach OCR');
+   ocrResult=await ocrRequest(mykadForm());assert.equal(ocrResult.response.status,200);assert.equal(ocrResult.body.status,'VERIFIED');assert.equal(ocrResult.body.document_type,'mykad');assert.equal(ocrResult.body.extracted_document_number_masked,'******-**-1234');assert.doesNotMatch(JSON.stringify(ocrResult.body),/PRIVATE FULL OCR TEXT|PRIVATE BASE64/);
+   assert.match(ocrCalls.at(-1).body,/name="mykad_front"/);assert.match(ocrCalls.at(-1).body,/name="mykad_back"/);assert.match(ocrCalls.at(-1).body,/name="entered_nric"/);assert.equal(ocrCalls.at(-1).headers['x-api-key'],undefined,'Portal credential is not forwarded to OCR');
+   ocrResults.push({http:200,body:{verified:false,status:'MANUAL_REVIEW',message:'Review required',document_type:'passport',extracted_document_number_masked:'*****678'}});
+   ocrResult=await ocrRequest(passportForm());assert.equal(ocrResult.body.status,'MANUAL_REVIEW');assert.equal(ocrResult.body.document_type,'passport');assert.match(ocrCalls.at(-1).body,/name="passport_image"/);assert.match(ocrCalls.at(-1).body,/name="entered_passport_number"/);
+   ocrResults.push({http:422,body:{verified:false,status:'INVALID_REQUEST',message:'entered_name is required.'}});
+   ocrResult=await ocrRequest(new FormData());assert.equal(ocrResult.response.status,422);assert.equal(ocrResult.body.status,'INVALID_REQUEST');
+   const badImage=new FormData();badImage.set('document_type','passport');badImage.set('passport_image',new Blob(['not an image'],{type:'text/plain'}),'bad.txt');
+   const callsBeforeBadImage=ocrCalls.length;ocrResult=await ocrRequest(badImage);assert.equal(ocrResult.response.status,400);assert.equal(ocrResult.body.status,'INVALID_REQUEST');assert.equal(ocrCalls.length,callsBeforeBadImage,'Unsupported uploads are rejected before OCR');
+   const largeImage=new FormData();largeImage.set('document_type','passport');largeImage.set('passport_image',new Blob([Buffer.alloc(8*1024*1024+1)],{type:'image/png'}),'large.png');
+   ocrResult=await ocrRequest(largeImage);assert.equal(ocrResult.response.status,413);assert.equal(ocrResult.body.status,'INVALID_REQUEST');
+   ocrMode='timeout';ocrResult=await ocrRequest(mykadForm());assert.equal(ocrResult.response.status,504);assert.equal(ocrResult.body.status,'OCR_TIMEOUT');
+   ocrMode='unavailable';ocrResult=await ocrRequest(mykadForm());assert.equal(ocrResult.response.status,503);assert.equal(ocrResult.body.status,'OCR_API_UNAVAILABLE');ocrMode='response';
+   const audit=(await db.query('SELECT status,document_type,masked_document_number FROM portal_ocr_verifications')).rows
+     .map(row=>[row.status,row.document_type,row.masked_document_number]).sort((a,b)=>a[0].localeCompare(b[0]));
+   assert.deepEqual(audit,[['INVALID_REQUEST',null,null],['MANUAL_REVIEW','passport','*****678'],['VERIFIED','mykad','******-**-1234']]);
+   assert.equal(submissions.length,0,'Inbound OCR verification never submits to RPA');
    assert.equal((await request('/')).response.status,303);
    let page=await request('/login');assert.equal(page.response.status,200);
    const csrf=field(page.text,'_csrf');
@@ -134,11 +164,12 @@ async function freePort(){const s=net.createServer();s.listen(0,'127.0.0.1');awa
    }
    await request('/logout',{_csrf:token});assert.equal((await request(`/request-status/${row.id}`)).response.status,401);
    assert.doesNotMatch(logs,/Portal application error|Portal request polling failed|Fatal error/);
-   console.log('HTTP login, form submission, filtered pagination, private access, clean details, status polling and logout passed with partial and full email migrations.');
+   console.log('HTTP login, form-to-RPA flow, inbound OCR authentication, MyKad/passport forwarding, outcome relay, upload errors, timeout, summary-only persistence, filtered pagination, private access, status polling and logout passed.');
  } catch(error){console.error(logs);throw error;}
  finally {
    if(app && app.exitCode===null){const exited=once(app,'exit');app.kill();await exited;}
    if(bot.listening)await new Promise(r=>bot.close(r));
+   if(ocr.listening)await new Promise(r=>ocr.close(r));
    await socket.stop();await db.close();
    // Only remove this generated temporary app copy, never the real project.
    const resolved=fs.realpathSync(temp),parent=fs.realpathSync(os.tmpdir());

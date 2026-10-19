@@ -1,0 +1,25 @@
+# Replace every <...> value with infrastructure-provided values before use.
+# Install this server block on the private OCR VM; do not expose port 8000.
+server {
+    listen 443 ssl;
+    server_name <PRIVATE_OCR_FQDN>;
+
+    ssl_certificate     <PATH_TO_PRIVATE_OCR_CERTIFICATE>;
+    ssl_certificate_key <PATH_TO_PRIVATE_OCR_PRIVATE_KEY>;
+
+    client_max_body_size 17m;
+    client_body_timeout 30s;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 210s;
+        proxy_read_timeout 210s;
+    }
+}

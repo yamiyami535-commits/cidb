@@ -1,0 +1,28 @@
+[Unit]
+Description=CIDB identity document OCR API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cidb-ocr
+Group=cidb-ocr
+WorkingDirectory=/opt/cidb-ocr
+EnvironmentFile=/etc/cidb-ocr/ocr.env
+Environment=HOME=/var/lib/cidb-ocr
+ExecStart=/opt/cidb-ocr/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/cidb-ocr
+
+[Install]
+WantedBy=multi-user.target
