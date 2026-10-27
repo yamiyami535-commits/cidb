@@ -85,6 +85,9 @@ try {
         exit;
     }
     require_login();
+    if ($path === '/tickets' || str_starts_with($path, '/tickets/')) {
+        require dirname(__DIR__) . '/src/ticket-routes.php'; exit;
+    }
     if ($path === '/request-history' && $method === 'GET') {
         $source=is_string($_GET['source']??null) && in_array($_GET['source'],['all','form','email'],true) ? $_GET['source'] : 'all';
         $page=is_string($_GET['page']??null) ? filter_var($_GET['page'],FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]) : false;
@@ -125,5 +128,14 @@ try {
     if ($path !== '/' && $path !== '/index.php') { http_response_code(404); render('not-found'); exit; }
     $requests=(new RequestHistory(db()))->list(current_user()['id'],'all',5);
     $errors=$_SESSION['form_errors']??[]; $values=$_SESSION['form_values']??[]; unset($_SESSION['form_errors'],$_SESSION['form_values']);
-    render('home',['flash'=>take_flash(),'requests'=>$requests,'errors'=>$errors,'values'=>$values]);
+    // Queue availability must never prevent customer submission or recent activity.
+    require_once dirname(__DIR__) . '/src/tickets.php';
+    $ticketNavigation=[];
+    try {
+        $ticketSchemaReady=db()->query("SELECT to_regclass('portal_tickets') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('portal_users') AND attname='role' AND NOT attisdropped)")->fetchColumn();
+        if ($ticketSchemaReady) $ticketNavigation=(new TicketRepository(db(),current_user()))->counts(ticket_filters([]));
+    }
+    catch (TicketAccessDenied) { /* No operational data for non-staff accounts. */ }
+    catch (Throwable $e) { error_log('Ticket navigation unavailable: '.$e->getMessage()); }
+    render('home',['flash'=>take_flash(),'requests'=>$requests,'errors'=>$errors,'values'=>$values,'ticketNavigation'=>$ticketNavigation]);
 } catch (Throwable $e) { error_log('Portal application error: '.$e->getMessage()); http_response_code(500); render('error'); }
