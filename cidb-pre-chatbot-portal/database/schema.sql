@@ -46,3 +46,4 @@ CREATE INDEX ix_portal_requests_rpa_reference ON portal_requests (rpa_reference_
 
 -- psql entry point: use the same additive email migration for fresh and existing databases.
 \ir migrations/20260925_email_reader.sql
+\ir migrations/20261019_ocr_verifications.sql
