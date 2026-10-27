@@ -1,4 +1,8 @@
-<?php $flash ??= null; $requests ??= []; $errors ??= []; $values ??= []; ob_start(); ?>
+<?php $flash ??= null; $requests ??= []; $errors ??= []; $values ??= []; $activeTicketPage='service'; $mainClass='portal-main'; ob_start(); ?>
+<div class="portal-workspace">
+<?php require __DIR__.'/ticket-sidebar.php'; ?>
+<div class="portal-workspace-content">
+<button class="sidebar-toggle" type="button" data-sidebar-toggle aria-expanded="true" aria-controls="ticket-sidebar"><span aria-hidden="true">☰</span><span class="sidebar-toggle-label">Hide menu</span></button>
 <section class="hero"><div class="hero-text"><div class="eyebrow"><span class="eyebrow-line"></span>CIDB SERVICE REQUEST</div><h1>Lets get your<br><em>request started.</em></h1><p>Share a few details and our digital service team will take it from here.</p><div class="hero-trust"><span class="trust-icon">✓</span> Secure submission <b></b> Takes less than a minute</div></div><div class="hero-visual" aria-hidden="true"><div class="visual-card"><span class="visual-label">YOUR NEXT STEP</span><div class="visual-number">01</div><div class="visual-rule"></div><strong>A smoother<br>service experience</strong><span class="visual-orb"></span></div><span class="visual-spark spark-a">✳</span><span class="visual-spark spark-b">✦</span></div></section>
 <section class="content-grid"><div class="form-card"><div class="card-head"><div><div class="panel-kicker">REQUEST DETAILS</div><h2>Submit your information</h2></div><div class="step-pill"><span>1</span> of 1</div></div><p class="muted intro">Complete the fields below. We'll securely pass your request to the relevant service process.</p>
 <?php if (!empty($flash)): ?><div class="notice <?= e($flash['kind']) ?>" role="status"><?= e($flash['message']) ?></div><?php endif; ?>
@@ -28,4 +32,5 @@
     </a>
   <?php } } ?>
 </div></aside></section>
+</div></div>
 <?php $content=ob_get_clean(); $title='Service request Â· CIDB Digital Services'; require __DIR__.'/layout.php'; ?>
