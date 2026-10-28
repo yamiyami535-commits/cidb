@@ -2,11 +2,17 @@
 declare(strict_types=1);
 namespace Cidb\Email;
 
+use Cidb\Ticketing\CancellationDetector;
+
+require_once dirname(__DIR__).'/Ticketing/CancellationDetector.php';
+
 final class MessageSelector implements Selector {
     public function __construct(private readonly Config $config) {}
     public function accepts(array $message): bool {
+        if (!CancellationDetector::matches($message)) return false;
+
         // Dedicated-folder policy: every arrival is selected regardless of sender,
-        // subject or reply headers. Extraction still rejects ambiguous case data.
+        // sender or reply headers, once it is identified as an ID cancellation.
         $mode=$this->config->get('EMAIL_SELECTION_MODE');
         if ($mode==='all') return true;
         $sender=strtolower(trim($message['sender'] ?? ''));

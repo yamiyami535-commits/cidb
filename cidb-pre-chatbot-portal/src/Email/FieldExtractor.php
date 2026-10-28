@@ -31,8 +31,11 @@ final class FieldExtractor implements Extractor {
             if ($fields[$key]===null && $key!=='state') $missing[]=$label;
         }
         // Storage limits, not invented customer validation. Oversized fields need review, not truncation.
-        foreach (['name'=>200,'email'=>254,'nric'=>40] as $key=>$limit) {
-            if (mb_strlen($fields[$key] ?? '')>$limit) $ambiguous=true;
+        foreach (['name'=>200,'email'=>254,'nric'=>40,'crm'=>255] as $key=>$limit) {
+            if (mb_strlen($fields[$key] ?? '')>$limit) {
+                $ambiguous=true;
+                if ($key==='crm' && !in_array('CRM',$missing,true)) $missing[]='CRM';
+            }
         }
         return ['fields'=>$fields,'missing'=>$missing,'attention'=>$ambiguous];
     }

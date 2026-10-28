@@ -2,6 +2,8 @@
 
 Migration: [`database/migrations/20260925_email_reader.sql`](../database/migrations/20260925_email_reader.sql). That file contains the complete executable SQL, including its transaction and five-second lock timeout. It has not been applied to the portal database by this implementation work.
 
+The cancellation ticketing foundation is a separate follow-up migration: [`20261020_ticket_workflow.sql`](../database/migrations/20261020_ticket_workflow.sql). Apply it after this email migration before running either CLOG or email Cron1 ticket handoff. It creates ticket/scenario/bucket/document/action tables and does not run automatically.
+
 ## Existing database
 
 From the project directory, use the connection details for the intended portal database:

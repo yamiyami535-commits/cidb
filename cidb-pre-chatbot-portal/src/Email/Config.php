@@ -8,10 +8,14 @@ final class Config {
         $keys = ['EMAIL_ENABLED','EMAIL_IMAP_HOST','EMAIL_IMAP_PORT','EMAIL_IMAP_ENCRYPTION','EMAIL_USERNAME',
             'EMAIL_PASSWORD','EMAIL_FOLDER','EMAIL_BATCH_SIZE','EMAIL_TIMEOUT_SECONDS','EMAIL_MAX_MESSAGE_BYTES',
             'EMAIL_SELECTION_MODE','EMAIL_ALLOWED_SENDERS','EMAIL_SUBJECT_PATTERN','EMAIL_ALLOW_REPLIES',
-            'EMAIL_SELECTION_APPROVED','EMAIL_EXTRACTION_APPROVED','EMAIL_RPA_CONTRACT_APPROVED',
+            'EMAIL_SELECTION_APPROVED','EMAIL_EXTRACTION_APPROVED',
             'EMAIL_RETENTION_APPROVED','EMAIL_SMTP_HOST','EMAIL_SMTP_PORT','EMAIL_SMTP_ENCRYPTION',
             'EMAIL_SMTP_USERNAME','EMAIL_SMTP_PASSWORD','EMAIL_FROM_ADDRESS','EMAIL_FROM_NAME','EMAIL_TL_ADDRESS',
             'EMAIL_NOTIFICATION_SUBJECT','EMAIL_NOTIFICATION_BODY','EMAIL_NOTIFICATION_MAX_ATTEMPTS'];
+        $keys = array_merge($keys, [
+            'CLOG_DB_HOST','CLOG_DB_DATABASE','CLOG_DB_USERNAME','CLOG_DB_PASSWORD',
+            'CLOG_DB_TIMEOUT','CLOG_FILE_FETCH_BASE_URL',
+        ]);
         $values = [];
         foreach ($keys as $key) $values[$key] = \env_value($key);
         return new self($values);
@@ -31,7 +35,7 @@ final class Config {
     /** No I/O. Pending decisions must be supplied explicitly, not inferred from the sample. */
     public function problems(): array {
         $errors = [];
-        foreach (['EMAIL_SELECTION_APPROVED','EMAIL_EXTRACTION_APPROVED','EMAIL_RPA_CONTRACT_APPROVED','EMAIL_RETENTION_APPROVED'] as $key) {
+        foreach (['EMAIL_SELECTION_APPROVED','EMAIL_EXTRACTION_APPROVED','EMAIL_RETENTION_APPROVED'] as $key) {
             if (!$this->yes($key)) $errors[] = "$key must be confirmed";
         }
         foreach (['EMAIL_IMAP_HOST','EMAIL_USERNAME','EMAIL_PASSWORD','EMAIL_FOLDER'] as $key) {
@@ -64,5 +68,20 @@ final class Config {
             if ($this->integer($key,$default)<1) $errors[]="$key must be positive";
         }
         return array_unique($errors);
+    }
+    public function clogProblems(): array {
+        $errors = [];
+        foreach (['CLOG_DB_HOST','CLOG_DB_DATABASE','CLOG_DB_USERNAME'] as $key) {
+            if ($this->get($key) === '') $errors[] = "$key is required to look up CLOG attachments";
+        }
+        $baseUrl = $this->get('CLOG_FILE_FETCH_BASE_URL', 'https://cidb.daythree.net/handler/email_fetch/files');
+        $parts = parse_url($baseUrl);
+        if (filter_var($baseUrl, FILTER_VALIDATE_URL) === false || !is_array($parts)
+            || strtolower((string)($parts['scheme'] ?? '')) !== 'https'
+            || empty($parts['host']) || isset($parts['user']) || isset($parts['pass'])
+            || isset($parts['query']) || isset($parts['fragment'])) {
+            $errors[] = 'CLOG_FILE_FETCH_BASE_URL must be an HTTPS URL without credentials, query, or fragment';
+        }
+        return $errors;
     }
 }

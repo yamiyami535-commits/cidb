@@ -44,6 +44,11 @@ CREATE INDEX ix_portal_requests_user_created ON portal_requests (user_id, create
 CREATE INDEX ix_portal_requests_status_created ON portal_requests (status, created_at DESC);
 CREATE INDEX ix_portal_requests_rpa_reference ON portal_requests (rpa_reference_id) WHERE rpa_reference_id IS NOT NULL;
 
--- psql entry point: use the same additive email migration for fresh and existing databases.
+-- psql entry point: keep fresh databases aligned with the additive migrations.
 \ir migrations/20260925_email_reader.sql
 \ir migrations/20261019_ocr_verifications.sql
+\ir migrations/20261020_ticket_workflow.sql
+\ir migrations/20261021_ticket_attachment_lookup.sql
+\ir migrations/20261022_clog_open_status.sql
+\ir migrations/20261023_ticket_conversation_foundation.sql
+\ir migrations/20261027_ocr_manual_review.sql

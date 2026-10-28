@@ -1,6 +1,9 @@
 <?php
 declare(strict_types=1);
 require dirname(__DIR__).'/src/Email/autoload.php';
+require dirname(__DIR__).'/src/Ticketing/CancellationDetector.php';
+require dirname(__DIR__).'/src/Ticketing/ClogAttachmentReference.php';
+require dirname(__DIR__).'/src/Ticketing/ClogCaseStatus.php';
 require dirname(__DIR__).'/src/bootstrap.php';
 require dirname(__DIR__).'/src/request-result.php';
 require dirname(__DIR__).'/src/RpaClient.php';
@@ -8,6 +11,12 @@ require dirname(__DIR__).'/vendor/autoload.php';
 
 use Cidb\Email\{FieldExtractor,EmailRpa,Config,MessageSelector,BodyMessage};
 function expect(bool $condition,string $why): void { if (!$condition) throw new RuntimeException($why); }
+
+expect(\Cidb\Ticketing\ClogCaseStatus::isOpen('Open')
+    && \Cidb\Ticketing\ClogCaseStatus::isOpen(' open '),'CLOG Open status matching is case/space tolerant');
+expect(!\Cidb\Ticketing\ClogCaseStatus::isOpen('Closed')
+    && !\Cidb\Ticketing\ClogCaseStatus::isOpen('Offered')
+    && !\Cidb\Ticketing\ClogCaseStatus::isOpen(null),'Only CLOG Open cases are active candidates');
 
 $extractor=new FieldExtractor();
 $body="Hi support@example.test,\nTitle: Sample request\nState: Sarawak\nRemarks: For testing\nName: Sample Person\nNRIC: B0012345\nCRM: 001234-Ab/56\nEmail to Cancel ID: customer@example.test";
@@ -33,6 +42,8 @@ foreach (['CRM ID','CRMID','sCRMID','crm'] as $label) {
 }
 $missingCrm=$extractor->extract(['text'=>str_replace("CRM: 001234-Ab/56\n",'',$body)]);
 expect($missingCrm['missing']===['CRM'] && $missingCrm['fields']['crm']===null,'Missing CRM is required without a fabricated fallback');
+$oversizedCrm=$extractor->extract(['text'=>str_replace('001234-Ab/56',str_repeat('C',256),$body)]);
+expect($oversizedCrm['attention'] && in_array('CRM',$oversizedCrm['missing'],true),'Oversized CRM IDs require review and are not looked up');
 expect($extractor->extract(['text'=>$body."\nsCRMID: Other"])['attention'],'Conflicting CRM aliases require review');
 expect($extractor->extract(['text'=>$body."\nCRM: 001234-Ab/56"])['attention'],'Repeated CRM label requires review');
 foreach (FieldExtractor::LABELS as $field=>$label) {
@@ -125,11 +136,33 @@ $folderSelector=new MessageSelector(new Config([]));
 foreach (['agent@example.test','other@example.test','support@example.test',''] as $sender) {
     expect($folderSelector->accepts(array_replace($message,['sender'=>$sender,'auto_submitted'=>'auto-generated','in_reply_to'=>'thread'])),'Folder-only selection ignores sender and reply metadata');
 }
+expect(\Cidb\Ticketing\CancellationDetector::matches(['email_subject'=>'Permohonan pembatalan ID-123']), 'CLOG title identifies a Malay ID cancellation');
+expect(\Cidb\Ticketing\CancellationDetector::matches(['email_body'=>'Please cancel the registration ID ABC']), 'CLOG body identifies an English cancellation');
+expect(!\Cidb\Ticketing\CancellationDetector::matches(['email_subject'=>'General account enquiry']), 'Non-cancellation CLOG email is not ticketed');
+expect(!$folderSelector->accepts(array_replace($message,['text'=>'General account enquiry'])), 'Email intake still requires cancellation intent');
+$fileBase='https://cidb.daythree.net/handler/email_fetch/files';
+expect(\Cidb\Ticketing\ClogAttachmentReference::url($fileBase,'CRM-123','id document 1.pdf')
+    ===$fileBase.'/CRM-123/id%20document%201.pdf','Attachment URL encodes the filename as one path segment');
+expect(\Cidb\Ticketing\ClogAttachmentReference::url($fileBase,'CRM-123','File(1).pdf')
+    ===$fileBase.'/CRM-123/File%281%29.pdf','Attachment URL safely encodes ordinary punctuation');
+expect(\Cidb\Ticketing\ClogAttachmentReference::url($fileBase,'001234-Ab/56','proof 1.pdf')
+    ===$fileBase.'/001234-Ab%2F56/proof%201.pdf',
+    'Slash in CRM ID is encoded without adding a URL path segment');
+foreach ([
+    static fn()=>\Cidb\Ticketing\ClogAttachmentReference::url('http://cidb.daythree.net/files','CRM-123','file.pdf'),
+    static fn()=>\Cidb\Ticketing\ClogAttachmentReference::url($fileBase,'','file.pdf'),
+    static fn()=>\Cidb\Ticketing\ClogAttachmentReference::url($fileBase,'CRM-123',"bad\0name.pdf"),
+    static fn()=>\Cidb\Ticketing\ClogAttachmentReference::url($fileBase,'CRM-123','../private.pdf'),
+    static fn()=>\Cidb\Ticketing\ClogAttachmentReference::url($fileBase,"bad\\id",'file.pdf'),
+] as $invalidReference) {
+    try { $invalidReference(); throw new RuntimeException('Invalid attachment reference was accepted'); }
+    catch (InvalidArgumentException) {}
+}
 expect(count((new Config([]))->problems())>0,'Incomplete configuration cannot activate');
 expect(!array_filter((new Config([]))->problems(),fn($p)=>str_contains($p,'NOTIFICATION') || str_contains($p,'TL_ADDRESS') || str_contains($p,'SMTP') || str_contains($p,'FROM_ADDRESS')),'Disabled notifications require no settings');
 $launch=new Config(['EMAIL_IMAP_HOST'=>'mail.example.test','EMAIL_USERNAME'=>'support@example.test','EMAIL_PASSWORD'=>'fixture-only',
-    'EMAIL_EXTRACTION_APPROVED'=>'true','EMAIL_RPA_CONTRACT_APPROVED'=>'true','EMAIL_RETENTION_APPROVED'=>'true']);
-expect($launch->problems()===[],'Folder-only launch is ready without SMTP, TL templates, retry rules, or sender filters');
+    'EMAIL_EXTRACTION_APPROVED'=>'true','EMAIL_RETENTION_APPROVED'=>'true']);
+expect($launch->problems()===[],'Cancellation intake is ready without email-execution RPA or SMTP settings');
 
 expect(EmailRpa::interpret(0,'',CURLE_COULDNT_CONNECT)['outcome']==='safe_failure','Pre-dispatch failure safe');
 expect(EmailRpa::interpret(0,'',CURLE_OPERATION_TIMEDOUT)['outcome']==='uncertain','Timeout is uncertain');

@@ -12,6 +12,43 @@ $formInput=['name'=>'Test','email'=>'test@example.test','id_number'=>'TEST001','
 $formPayload=$client->payload($formInput);
 check($formPayload['fields']===['sCustomerType'=>'Individual','sEmail'=>'test@example.test','sCustomerName'=>'Test','sIdentificationNumber'=>'TEST001','sLanguage'=>'en','sChannel'=>'Email','sCRMID'=>'TEST-CRM'],'Form payload keeps all other fields without location');
 check($client->payload($formInput+['location_area'=>'Selangor'])===$formPayload,'Legacy form location input is not sent to RPA');
+$requestPayload=$client->workflowPayload([
+    'action_type'=>'request_information','crm'=>'TEST-CRM','email'=>'test@example.test',
+    'name'=>'Test','language'=>'en','filename'=>'front.png,back.png','state'=>'Sarawak',
+    'contact_number'=>'0123456789',
+]);
+check($requestPayload['fields']===[
+    'sCRMID'=>'TEST-CRM','sEmail'=>'test@example.test','sCustomerName'=>'Test','sLanguage'=>'en',
+    'sChannel'=>'Email','sState'=>'Sarawak','sContactNumber'=>'0123456789',
+    'sFilename'=>'front.png,back.png','sRequst'=>'Pending Customer Attachment',
+],'Request-information payload includes the agreed request and customer context');
+$cancelPayload=$client->workflowPayload([
+    'action_type'=>'execute_cancellation','crm'=>'TEST-CRM','email'=>'test@example.test',
+    'name'=>'Test','customer_type'=>'individual','id_number'=>'TEST001','language'=>'ms',
+    'ocr_status'=>'MANUAL_REVIEW_APPROVED','filename'=>'signed-form.pdf',
+]);
+check($cancelPayload['fields']===[
+    'sCRMID'=>'TEST-CRM','sEmail'=>'test@example.test','sCustomerName'=>'Test',
+    'sLanguage'=>'ms','sChannel'=>'Email','sCustomerType'=>'Individual',
+    'sIdentificationNumber'=>'TEST001','sFilename'=>'signed-form.pdf',
+    'sOCRStatus'=>'MANUAL_REVIEW_APPROVED','sAction'=>'Email Cancellation',
+],'Cancellation payload includes the identity and OCR-review context');
+check(
+    $client->workflowPayload([
+        'action_type'=>'request_information','crm'=>'TEST-CRM','email'=>'test@example.test',
+        'name'=>'Test','language'=>'en',
+    ])['fields']['sRequst']==='Pending Customer Attachment',
+    'Request-information does not assume an unverified customer type'
+);
+try {
+    $client->workflowPayload([
+        'action_type'=>'execute_cancellation','crm'=>'TEST-CRM','email'=>'test@example.test',
+        'name'=>'Test','language'=>'en','id_number'=>'TEST001','ocr_status'=>'VERIFIED',
+    ]);
+    throw new RuntimeException('Cancellation must reject unverified customer type.');
+} catch (InvalidArgumentException $error) {
+    check(str_contains($error->getMessage(),'verified customer type'),'Cancellation requires verified customer type');
+}
 $ack=['status'=>'inserted','schedule_id'=>'test-schedule','runner_note'=>'Assigned runner'];
 foreach ([$ack,['status'=>'success','display_message'=>'Old message'],['status'=>'failed']] as $payload) {
     $normalized=$client->normalize(response($payload));

@@ -5,7 +5,7 @@ namespace Cidb\Email;
 final class Processor {
     public function __construct(private readonly Store $store, private readonly Mailbox $mailbox,
         private readonly Selector $selector, private readonly Extractor $extractor,
-        private readonly Rpa $rpa, private readonly Notifier $notifier, private readonly Config $config) {}
+        private readonly Config $config) {}
 
     public function activate(): void {
         if (!$this->store->lock()) throw new \RuntimeException('Mailbox worker is busy');
@@ -16,7 +16,7 @@ final class Processor {
         } finally { try { $this->mailbox->close(); } finally { $this->store->unlock(); } }
     }
     public function run(): array {
-        $counts=['discovered'=>0,'recorded'=>0,'ignored'=>0,'rpa_attempted'=>0,'notifications_attempted'=>0,'errors'=>0];
+        $counts=['discovered'=>0,'recorded'=>0,'tickets_created'=>0,'ignored'=>0,'errors'=>0];
         if (!$this->store->lock()) return $counts+['busy'=>true];
         try {
             $state=$this->store->state();
@@ -36,30 +36,11 @@ final class Processor {
                     catch (\Throwable) { $this->store->attention($item,'EMAIL_PARSE_ERROR'); $counts['errors']++; continue; }
                     $item=$this->store->extracted($item,$message,$extraction,$this->config->get('EMAIL_TL_ADDRESS'));
                     $counts['recorded']++;
+                    if (!empty($item['ticket_id'])) $counts['tickets_created']++;
                     try { $this->mailbox->markRead((int)$item['message_uid']); $this->store->markedRead($item['id']); }
                     catch (\Throwable) { $counts['errors']++; } // Durable work remains independent of \Seen.
                 }
-                if (in_array($item['stage'],['ready','retry_due'],true)) {
-                    $attempt=$this->store->beginAttempt($item);
-                    if (!$attempt) continue;
-                    $counts['rpa_attempted']++;
-                    $payload=$item['rpa_request_payload'];
-                    if (is_string($payload)) $payload=json_decode($payload,true,512,JSON_THROW_ON_ERROR);
-                    try { $result=$this->rpa->send($payload); }
-                    catch (\Throwable) { $result=['outcome'=>'uncertain','error_code'=>'RPA_DISPATCH_EXCEPTION']; }
-                    $this->store->finishAttempt($item,$attempt,$result);
-                }
             }
-            /* Temporarily disabled: TL notification sending and retries, including
-               previously queued jobs. Restore after the TL policy is confirmed.
-            foreach ($this->store->notifications($limit) as $job) {
-                if (!$this->store->beginNotification($job['id'])) continue;
-                $counts['notifications_attempted']++;
-                try { $result=$this->notifier->send($job); }
-                catch (\Throwable) { $result=['outcome'=>'uncertain','error_code'=>'SMTP_DISPATCH_EXCEPTION']; }
-                $this->store->finishNotification($job,$result,$this->config->integer('EMAIL_NOTIFICATION_MAX_ATTEMPTS',1));
-            }
-            */
             $this->store->health($counts['errors']?'MESSAGE_PROCESSING_ERROR':null);
             return $counts;
         } catch (\Throwable $e) {

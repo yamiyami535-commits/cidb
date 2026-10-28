@@ -22,6 +22,88 @@ final class RpaClient
         ];
     }
 
+    public function workflowPayload(array $input): array
+    {
+        $actionType = $input['action_type'] ?? null;
+        if (!in_array($actionType, ['request_information', 'execute_cancellation'], true)) {
+            throw new InvalidArgumentException('Unsupported RPA workflow action.');
+        }
+
+        $languageValue = strtolower(trim((string)($input['language'] ?? '')));
+        $language = match ($languageValue) {
+            'en', 'english' => 'en',
+            'ms', 'malay', 'bahasa melayu' => 'ms',
+            default => null,
+        };
+        if ($language === null) {
+            throw new InvalidArgumentException('RPA workflow requires an explicit English or Malay language.');
+        }
+        $customerType = strtolower((string)($input['customer_type'] ?? ''));
+        if ($actionType === 'execute_cancellation' && !in_array($customerType, ['individual', 'company'], true)) {
+            throw new InvalidArgumentException('RPA workflow requires a verified customer type.');
+        }
+
+        $fields = [
+            'sCRMID' => $input['crm'] ?? $input['crm_id'] ?? null,
+            'sEmail' => $input['email'] ?? null,
+            'sCustomerName' => $input['name'] ?? null,
+            'sLanguage' => $language,
+            'sChannel' => 'Email',
+        ];
+        if (in_array($customerType, ['individual', 'company'], true)) {
+            $fields['sCustomerType'] = ucfirst($customerType);
+        }
+        foreach ([
+            'sIdentificationNumber' => ['id_number', 'nric'],
+            'sState' => ['state'],
+            'sContactNumber' => ['contact_number', 'phone'],
+            'sFilename' => ['filename'],
+            'sOCRStatus' => ['ocr_status'],
+        ] as $key => $candidateKeys) {
+            foreach ($candidateKeys as $candidateKey) {
+                $value = trim((string)($input[$candidateKey] ?? ''));
+                if ($value !== '') {
+                    $fields[$key] = $value;
+                    break;
+                }
+            }
+        }
+
+        if ($actionType === 'request_information') {
+            $fields['sRequst'] = 'Pending Customer Attachment';
+        } else {
+            $fields['sAction'] = 'Email Cancellation';
+        }
+
+        foreach ($fields as $key => $value) {
+            if ($value === null || trim((string)$value) === '') {
+                unset($fields[$key]);
+            } else {
+                $fields[$key] = trim((string)$value);
+            }
+        }
+
+        $required = $actionType === 'request_information'
+            ? ['sCRMID', 'sEmail', 'sCustomerName', 'sLanguage', 'sRequst']
+            : [
+                'sCRMID', 'sEmail', 'sCustomerName', 'sCustomerType',
+                'sIdentificationNumber', 'sLanguage', 'sOCRStatus', 'sAction',
+            ];
+        $missing = array_values(array_filter($required, static fn(string $key): bool => !isset($fields[$key])));
+        if ($missing !== []) {
+            throw new InvalidArgumentException(
+                'RPA workflow payload is missing required fields: ' . implode(', ', $missing)
+            );
+        }
+
+        return [
+            'company' => env_value('RPA_COMPANY', 'CIDB'),
+            'scenario_key' => env_value('RPA_SCENARIO_KEY', 'cidb_masterbot'),
+            'channel' => 'Email',
+            'fields' => $fields,
+        ];
+    }
+
     public function send(array $payload): array
     {
         $endpoint = env_value('RPA_BOT_ENDPOINT');

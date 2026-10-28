@@ -2,6 +2,14 @@
 const { createRequire } = require('node:module');
 const { join } = require('node:path');
 const { spawn } = require('node:child_process');
+if (typeof globalThis.CustomEvent === 'undefined') {
+  globalThis.CustomEvent = class CustomEvent extends Event {
+    constructor(type, options = {}) {
+      super(type);
+      this.detail = options.detail;
+    }
+  };
+}
 const testRequire=createRequire(join(__dirname,'../var/email-test-runtime/package.json'));
 const { PGlite }=testRequire('@electric-sql/pglite');
 const { pgcrypto }=testRequire('@electric-sql/pglite/contrib/pgcrypto');

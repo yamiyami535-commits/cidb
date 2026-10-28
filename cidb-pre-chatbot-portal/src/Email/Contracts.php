@@ -16,6 +16,10 @@ interface Selector { public function accepts(array $message): bool; }
 interface Extractor { public function extract(array $message): array; }
 interface Rpa { public function send(array $payload): array; }
 interface Notifier { public function send(array $job): array; }
+interface ClogAttachmentProvider {
+    /** @return array{email_ids:list<string>,files:list<array{email_id:string,crm_id:string,filename:string}>} */
+    public function lookup(string $crmId): array;
+}
 interface Store {
     public function lock(): bool;
     public function unlock(): void;
