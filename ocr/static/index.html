@@ -1,0 +1,1123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
+  <title>CIDB Document Verification</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    :root {
+      --primary: #0f766e;
+      --primary-light: #ccfbf1;
+      --success: #15803d;
+      --danger: #b91c1c;
+      --warning: #b45309;
+      --text: #1e293b;
+      --muted: #64748b;
+      --border: #dbe3ea;
+      --background: #f3f8f7;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family:
+        Inter, Arial, Helvetica, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(
+          circle at top left,
+          #ccfbf1,
+          transparent 34%
+        ),
+        linear-gradient(
+          135deg,
+          #f0fdfa,
+          #f8fafc
+        );
+    }
+
+    .page {
+      width: min(1050px, calc(100% - 32px));
+      margin: auto;
+      padding: 42px 0;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+
+    .logo {
+      width: 72px;
+      height: 72px;
+      margin: auto;
+      display: grid;
+      place-items: center;
+      border-radius: 22px;
+      color: white;
+      font-size: 32px;
+      background:
+        linear-gradient(
+          135deg,
+          #0f766e,
+          #14b8a6
+        );
+      box-shadow:
+        0 15px 35px
+        rgba(15, 118, 110, 0.24);
+    }
+
+    h1 {
+      margin: 17px 0 7px;
+      color: #134e4a;
+    }
+
+    .header p {
+      margin: auto;
+      max-width: 680px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .card {
+      padding: 30px;
+      border: 1px solid white;
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.97);
+      box-shadow:
+        0 24px 70px
+        rgba(15, 23, 42, 0.10);
+    }
+
+    .document-selector {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 15px;
+      margin-bottom: 27px;
+    }
+
+    .document-option {
+      position: relative;
+      padding: 20px;
+      border: 2px solid var(--border);
+      border-radius: 16px;
+      cursor: pointer;
+      transition: 0.2s;
+      background: white;
+    }
+
+    .document-option:hover {
+      border-color: #5eead4;
+      background: #f0fdfa;
+    }
+
+    .document-option.selected {
+      border-color: var(--primary);
+      background: #f0fdfa;
+      box-shadow:
+        0 0 0 4px
+        rgba(15, 118, 110, 0.08);
+    }
+
+    .document-option input {
+      position: absolute;
+      opacity: 0;
+    }
+
+    .document-option strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #134e4a;
+      font-size: 17px;
+    }
+
+    .document-option span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .full-width {
+      grid-column: 1 / -1;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    label {
+      font-size: 14px;
+      font-weight: 750;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 14px 15px;
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      font-size: 15px;
+      outline: none;
+    }
+
+    input[type="text"]:focus {
+      border-color: var(--primary);
+      box-shadow:
+        0 0 0 4px
+        rgba(15, 118, 110, 0.10);
+    }
+
+    .upload-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-top: 20px;
+    }
+
+    .upload-box {
+      padding: 20px;
+      text-align: center;
+      border: 2px dashed #99f6e4;
+      border-radius: 16px;
+      background: #f0fdfa;
+    }
+
+    .upload-box strong {
+      display: block;
+      margin-bottom: 8px;
+      color: #115e59;
+    }
+
+    .upload-box small {
+      display: block;
+      margin-bottom: 13px;
+      color: var(--muted);
+    }
+
+    .preview {
+      display: none;
+      width: 100%;
+      max-height: 300px;
+      margin-top: 15px;
+      padding: 6px;
+      object-fit: contain;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: white;
+    }
+
+    .notice {
+      margin-top: 20px;
+      padding: 14px 16px;
+      border-radius: 13px;
+      color: #92400e;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .submit-button {
+      width: 100%;
+      margin-top: 24px;
+      padding: 15px;
+      border: 0;
+      border-radius: 13px;
+      color: white;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+      background:
+        linear-gradient(
+          135deg,
+          #0f766e,
+          #14b8a6
+        );
+      box-shadow:
+        0 12px 25px
+        rgba(15, 118, 110, 0.20);
+    }
+
+    .submit-button:disabled {
+      cursor: wait;
+      opacity: 0.65;
+    }
+
+    #loading {
+      display: none;
+      padding: 30px;
+      text-align: center;
+    }
+
+    .spinner {
+      width: 44px;
+      height: 44px;
+      margin: auto auto 14px;
+      border: 4px solid #ccfbf1;
+      border-top-color: #0f766e;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    #resultSection {
+      display: none;
+      margin-top: 28px;
+    }
+
+    .result-card {
+      padding: 25px;
+      border: 1px solid;
+      border-radius: 20px;
+    }
+
+    .result-card.success {
+      border-color: #86efac;
+      background: #f0fdf4;
+    }
+
+    .result-card.warning {
+      border-color: #fde68a;
+      background: #fffbeb;
+    }
+
+    .result-card.error {
+      border-color: #fecaca;
+      background: #fef2f2;
+    }
+
+    .result-heading {
+      display: flex;
+      gap: 15px;
+      align-items: center;
+    }
+
+    .result-icon {
+      width: 55px;
+      height: 55px;
+      flex-shrink: 0;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      font-size: 27px;
+      font-weight: bold;
+      background: white;
+    }
+
+    .result-heading h2 {
+      margin: 0;
+    }
+
+    .result-heading p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .status {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.75);
+      font-size: 12px;
+      font-weight: bold;
+    }
+
+    .details {
+      display: grid;
+      grid-template-columns:
+        repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .detail {
+      padding: 15px;
+      border-radius: 13px;
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+    }
+
+    .detail small {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      text-transform: uppercase;
+      font-weight: bold;
+    }
+
+    .detail strong {
+      overflow-wrap: anywhere;
+    }
+
+    .processed-images {
+      display: grid;
+      grid-template-columns:
+        repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 22px;
+    }
+
+    .processed-card {
+      padding: 14px;
+      border-radius: 15px;
+      background: white;
+      border: 1px solid var(--border);
+    }
+
+    .processed-card h3 {
+      margin: 0 0 12px;
+      font-size: 15px;
+    }
+
+    .processed-card img {
+      width: 100%;
+      max-height: 340px;
+      object-fit: contain;
+      border-radius: 10px;
+      background: #f8fafc;
+    }
+
+    .download-button {
+      display: block;
+      margin-top: 11px;
+      padding: 10px;
+      text-align: center;
+      text-decoration: none;
+      border-radius: 10px;
+      color: white;
+      background: var(--primary);
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    .reset-button {
+      width: 100%;
+      margin-top: 18px;
+      padding: 12px;
+      border: 1px solid var(--primary);
+      border-radius: 11px;
+      color: var(--primary);
+      background: white;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 750px) {
+      .document-selector,
+      .form-grid,
+      .upload-grid,
+      .details,
+      .processed-images {
+        grid-template-columns: 1fr;
+      }
+
+      .full-width {
+        grid-column: auto;
+      }
+
+      .card {
+        padding: 21px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="page">
+
+    <header class="header">
+      <div class="logo">✓</div>
+
+      <h1>CIDB Document Verification</h1>
+
+      <p>
+        Verify a Malaysian MyKad or passport and
+        automatically generate CIDB-labelled document copies.
+      </p>
+    </header>
+
+    <section class="card">
+
+      <form id="verificationForm">
+
+        <h2>Select document type</h2>
+
+        <div class="document-selector">
+
+          <label
+            id="mykadOption"
+            class="document-option selected"
+          >
+            <input
+              type="radio"
+              name="document_type"
+              value="mykad"
+              checked
+            >
+
+            <strong>Malaysian MyKad</strong>
+
+            <span>
+              Requires both front and back images
+            </span>
+          </label>
+
+          <label
+            id="passportOption"
+            class="document-option"
+          >
+            <input
+              type="radio"
+              name="document_type"
+              value="passport"
+            >
+
+            <strong>Passport</strong>
+
+            <span>
+              Upload the passport information page
+            </span>
+          </label>
+
+        </div>
+
+        <div class="form-grid">
+
+          <div class="form-group full-width">
+            <label for="enteredName">
+              Full name
+            </label>
+
+            <input
+              id="enteredName"
+              name="entered_name"
+              type="text"
+              placeholder="Enter name shown on document"
+              required
+            >
+          </div>
+
+          <div
+            id="nricGroup"
+            class="form-group full-width"
+          >
+            <label for="enteredNric">
+              NRIC number
+            </label>
+
+            <input
+              id="enteredNric"
+              name="entered_nric"
+              type="text"
+              placeholder="Example: 900101-10-1234"
+            >
+          </div>
+
+          <div
+            id="passportNumberGroup"
+            class="form-group full-width hidden"
+          >
+            <label for="enteredPassportNumber">
+              Passport number
+            </label>
+
+            <input
+              id="enteredPassportNumber"
+              name="entered_passport_number"
+              type="text"
+              placeholder="Enter passport number"
+            >
+          </div>
+
+        </div>
+
+        <div
+          id="mykadUploads"
+          class="upload-grid"
+        >
+          <div class="upload-box">
+            <strong>MyKad Front</strong>
+
+            <small>
+              Upload a clear front image
+            </small>
+
+            <input
+              id="mykadFront"
+              name="mykad_front"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+            >
+
+            <img
+              id="mykadFrontPreview"
+              class="preview"
+              alt="MyKad front preview"
+            >
+          </div>
+
+          <div class="upload-box">
+            <strong>MyKad Back</strong>
+
+            <small>
+              Upload a clear back image
+            </small>
+
+            <input
+              id="mykadBack"
+              name="mykad_back"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+            >
+
+            <img
+              id="mykadBackPreview"
+              class="preview"
+              alt="MyKad back preview"
+            >
+          </div>
+        </div>
+
+        <div
+          id="passportUploads"
+          class="upload-grid hidden"
+        >
+          <div class="upload-box full-width">
+            <strong>Passport Information Page</strong>
+
+            <small>
+              Upload the page containing the name,
+              passport number, photo and MRZ
+            </small>
+
+            <input
+              id="passportImage"
+              name="passport_image"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+            >
+
+            <img
+              id="passportPreview"
+              class="preview"
+              alt="Passport preview"
+            >
+          </div>
+        </div>
+
+        <div class="notice">
+          The system automatically applies the diagonal
+          <strong>KEGUNAAN CIDB SAHAJA</strong> label.
+          The original uploaded file is not modified.
+        </div>
+
+        <button
+          id="submitButton"
+          class="submit-button"
+          type="submit"
+        >
+          Verify and Process Document
+        </button>
+
+      </form>
+
+      <div id="loading">
+        <div class="spinner"></div>
+
+        <strong>
+          Verifying and processing the document...
+        </strong>
+
+        <p>
+          OCR processing may take several seconds.
+        </p>
+      </div>
+
+      <section id="resultSection">
+        <div id="resultCard" class="result-card">
+
+          <div class="result-heading">
+            <div
+              id="resultIcon"
+              class="result-icon"
+            ></div>
+
+            <div>
+              <h2 id="resultTitle"></h2>
+              <p id="resultMessage"></p>
+              <span
+                id="statusBadge"
+                class="status"
+              ></span>
+            </div>
+          </div>
+
+          <div
+            id="resultDetails"
+            class="details"
+          ></div>
+
+          <div
+            id="processedImages"
+            class="processed-images"
+          ></div>
+
+          <button
+            id="resetButton"
+            class="reset-button"
+            type="button"
+          >
+            Verify Another Document
+          </button>
+
+        </div>
+      </section>
+
+    </section>
+
+  </main>
+
+  <script>
+    const form =
+      document.getElementById("verificationForm");
+
+    const mykadOption =
+      document.getElementById("mykadOption");
+
+    const passportOption =
+      document.getElementById("passportOption");
+
+    const nricGroup =
+      document.getElementById("nricGroup");
+
+    const passportNumberGroup =
+      document.getElementById(
+        "passportNumberGroup"
+      );
+
+    const mykadUploads =
+      document.getElementById("mykadUploads");
+
+    const passportUploads =
+      document.getElementById("passportUploads");
+
+    const enteredNric =
+      document.getElementById("enteredNric");
+
+    const enteredPassportNumber =
+      document.getElementById(
+        "enteredPassportNumber"
+      );
+
+    const mykadFront =
+      document.getElementById("mykadFront");
+
+    const mykadBack =
+      document.getElementById("mykadBack");
+
+    const passportImage =
+      document.getElementById("passportImage");
+
+    const submitButton =
+      document.getElementById("submitButton");
+
+    const loading =
+      document.getElementById("loading");
+
+    const resultSection =
+      document.getElementById("resultSection");
+
+    const resultCard =
+      document.getElementById("resultCard");
+
+    const resultIcon =
+      document.getElementById("resultIcon");
+
+    const resultTitle =
+      document.getElementById("resultTitle");
+
+    const resultMessage =
+      document.getElementById("resultMessage");
+
+    const statusBadge =
+      document.getElementById("statusBadge");
+
+    const resultDetails =
+      document.getElementById("resultDetails");
+
+    const processedImages =
+      document.getElementById("processedImages");
+
+    const resetButton =
+      document.getElementById("resetButton");
+
+
+    function selectedDocumentType() {
+      return document.querySelector(
+        'input[name="document_type"]:checked'
+      ).value;
+    }
+
+
+    function updateDocumentForm() {
+      const type = selectedDocumentType();
+      const isMyKad = type === "mykad";
+
+      mykadOption.classList.toggle(
+        "selected",
+        isMyKad
+      );
+
+      passportOption.classList.toggle(
+        "selected",
+        !isMyKad
+      );
+
+      nricGroup.classList.toggle(
+        "hidden",
+        !isMyKad
+      );
+
+      mykadUploads.classList.toggle(
+        "hidden",
+        !isMyKad
+      );
+
+      passportNumberGroup.classList.toggle(
+        "hidden",
+        isMyKad
+      );
+
+      passportUploads.classList.toggle(
+        "hidden",
+        isMyKad
+      );
+
+      enteredNric.required = isMyKad;
+      mykadFront.required = isMyKad;
+      mykadBack.required = isMyKad;
+
+      enteredPassportNumber.required = !isMyKad;
+      passportImage.required = !isMyKad;
+    }
+
+
+    document
+      .querySelectorAll(
+        'input[name="document_type"]'
+      )
+      .forEach(input => {
+        input.addEventListener(
+          "change",
+          updateDocumentForm
+        );
+      });
+
+
+    function setupPreview(
+      inputElement,
+      previewElementId
+    ) {
+      const preview = document.getElementById(
+        previewElementId
+      );
+
+      inputElement.addEventListener(
+        "change",
+        () => {
+          const file = inputElement.files[0];
+
+          if (!file) {
+            preview.src = "";
+            preview.style.display = "none";
+            return;
+          }
+
+          preview.src =
+            URL.createObjectURL(file);
+
+          preview.style.display = "block";
+        }
+      );
+    }
+
+
+    setupPreview(
+      mykadFront,
+      "mykadFrontPreview"
+    );
+
+    setupPreview(
+      mykadBack,
+      "mykadBackPreview"
+    );
+
+    setupPreview(
+      passportImage,
+      "passportPreview"
+    );
+
+
+    function statusDesign(status) {
+      if (status === "VERIFIED") {
+        return {
+          type: "success",
+          icon: "✓",
+          title: "Verification Successful"
+        };
+      }
+
+      if (
+        status === "MANUAL_REVIEW"
+        || status === "REUPLOAD_REQUIRED"
+      ) {
+        return {
+          type: "warning",
+          icon: "!",
+          title:
+            status === "REUPLOAD_REQUIRED"
+              ? "New Image Required"
+              : "Manual Review Required"
+        };
+      }
+
+      return {
+        type: "error",
+        icon: "×",
+        title: "Verification Unsuccessful"
+      };
+    }
+
+
+    function detailCard(label, value) {
+      return `
+        <div class="detail">
+          <small>${label}</small>
+          <strong>${value ?? "Not available"}</strong>
+        </div>
+      `;
+    }
+
+
+    function displayResult(data) {
+      const design = statusDesign(data.status);
+
+      resultCard.className =
+        `result-card ${design.type}`;
+
+      resultIcon.textContent = design.icon;
+      resultTitle.textContent = design.title;
+      resultMessage.textContent = data.message;
+
+      statusBadge.textContent =
+        data.status.replaceAll("_", " ");
+
+      resultDetails.innerHTML = "";
+
+      if (data.document_type) {
+        resultDetails.innerHTML += detailCard(
+          "Document Type",
+          data.document_type === "mykad"
+            ? "MyKad"
+            : "Passport"
+        );
+      }
+
+      if (data.extracted_document_number_masked) {
+        resultDetails.innerHTML += detailCard(
+          "Document Number",
+          data.extracted_document_number_masked
+        );
+      }
+
+      if (data.comparison) {
+        resultDetails.innerHTML += detailCard(
+          "Name Similarity",
+          `${data.comparison.name_similarity}%`
+        );
+
+        resultDetails.innerHTML += detailCard(
+          "Number Match",
+          data.comparison.document_number_match
+            ? "Matched"
+            : "Not Matched"
+        );
+
+        resultDetails.innerHTML += detailCard(
+          "Name Match",
+          data.comparison.name_match
+            ? "Matched"
+            : "Not Matched"
+        );
+      }
+
+      if (
+        data.ocr_average_confidence
+        !== null
+        && data.ocr_average_confidence
+        !== undefined
+      ) {
+        resultDetails.innerHTML += detailCard(
+          "OCR Confidence",
+          `${
+            (
+              data.ocr_average_confidence * 100
+            ).toFixed(2)
+          }%`
+        );
+      }
+
+      processedImages.innerHTML = "";
+
+      for (
+        const image of
+        data.processed_images ?? []
+      ) {
+        processedImages.innerHTML += `
+          <div class="processed-card">
+            <h3>${image.label}</h3>
+
+            <img
+              src="${image.data_url}"
+              alt="${image.label}"
+            >
+
+            <a
+              class="download-button"
+              href="${image.data_url}"
+              download="${image.filename}"
+            >
+              Download CIDB-Labelled Image
+            </a>
+          </div>
+        `;
+      }
+
+      resultSection.style.display = "block";
+
+      resultSection.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      });
+    }
+
+
+    function displayError(message) {
+      displayResult({
+        status: "ERROR",
+        document_type:
+          selectedDocumentType(),
+        message,
+        processed_images: []
+      });
+
+      resultTitle.textContent =
+        "Something Went Wrong";
+    }
+
+
+    form.addEventListener(
+      "submit",
+      async event => {
+        event.preventDefault();
+
+        submitButton.disabled = true;
+        submitButton.textContent =
+          "Processing...";
+
+        resultSection.style.display = "none";
+        loading.style.display = "block";
+
+        try {
+          const response = await fetch(
+            "/api/verify-document",
+            {
+              method: "POST",
+              body: new FormData(form)
+            }
+          );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+              data.message
+              || data.detail
+              || "The request failed."
+            );
+      }
+
+          displayResult(data);
+
+        } catch (error) {
+          displayError(error.message);
+
+        } finally {
+          loading.style.display = "none";
+          submitButton.disabled = false;
+          submitButton.textContent =
+            "Verify and Process Document";
+        }
+      }
+    );
+
+
+    resetButton.addEventListener(
+      "click",
+      () => {
+        form.reset();
+
+        document.querySelector(
+          'input[value="mykad"]'
+        ).checked = true;
+
+        document
+          .querySelectorAll(".preview")
+          .forEach(preview => {
+            preview.src = "";
+            preview.style.display = "none";
+          });
+
+        resultSection.style.display = "none";
+
+        updateDocumentForm();
+
+        window.scrollTo({
+          top: 0,
+          behavior: "smooth"
+        });
+      }
+    );
+
+
+    updateDocumentForm();
+  </script>
+</body>
+</html>
