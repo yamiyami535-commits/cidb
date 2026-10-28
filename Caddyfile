@@ -1,0 +1,11 @@
+bfmt.duckdns.org {
+    reverse_proxy localhost:8081
+}
+
+cidb-rpa-portal.duckdns.org {
+    reverse_proxy localhost:8082
+}
+
+http://103.241.150.147, http://localhost {
+    reverse_proxy localhost:8080
+}

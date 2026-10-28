@@ -1,0 +1,8 @@
+{
+  "name": "cidb/pre-chatbot-portal",
+  "description": "Standalone CIDB pre-chatbot request portal",
+  "type": "project",
+  "require": { "php": "^8.2", "ext-pdo": "*", "ext-pdo_pgsql": "*", "ext-curl": "*",
+    "webklex/php-imap": "^6.2",
+    "phpmailer/phpmailer": "^7.1" }
+}
