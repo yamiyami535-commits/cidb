@@ -70,7 +70,7 @@ final class RpaClient
         }
 
         if ($actionType === 'request_information') {
-            $fields['sRequst'] = 'Pending Customer Attachment';
+            $fields['sRequest'] = 'Pending Customer Attachment';
         } else {
             $fields['sAction'] = 'Email Cancellation';
         }
@@ -84,7 +84,7 @@ final class RpaClient
         }
 
         $required = $actionType === 'request_information'
-            ? ['sCRMID', 'sEmail', 'sCustomerName', 'sLanguage', 'sRequst']
+            ? ['sCRMID', 'sEmail', 'sCustomerName', 'sLanguage', 'sRequest']
             : [
                 'sCRMID', 'sEmail', 'sCustomerName', 'sCustomerType',
                 'sIdentificationNumber', 'sLanguage', 'sOCRStatus', 'sAction',
@@ -112,7 +112,8 @@ final class RpaClient
         $ch = curl_init($endpoint);
         if ($ch === false) throw new RuntimeException('Unable to start the RPA request.');
         curl_setopt_array($ch, [CURLOPT_POST=>true, CURLOPT_POSTFIELDS=>json_encode($payload, JSON_THROW_ON_ERROR), CURLOPT_RETURNTRANSFER=>true,
-            CURLOPT_HTTPHEADER=>['Content-Type: application/json','Accept: application/json','X-API-Key: '.$key],
+            CURLOPT_SSL_VERIFYPEER=>false, CURLOPT_SSL_VERIFYHOST=>0,
+            CURLOPT_HTTPHEADER=>['Content-Type: application/json','Accept: */*','X-API-Key: '.$key],
             CURLOPT_CONNECTTIMEOUT_MS=>max(1000,(int)env_value('RPA_BOT_CONNECT_TIMEOUT_MS','5000')),
             CURLOPT_TIMEOUT_MS=>max(1000,(int)env_value('RPA_BOT_TIMEOUT_MS','15000'))]);
         $body = curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); $curlError = curl_error($ch); curl_close($ch);
