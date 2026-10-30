@@ -3,13 +3,13 @@ from collections.abc import Sequence
 
 from rapidfuzz import fuzz
 
-from app.config import settings
-from app.models import (
+from .config import settings
+from .models import (
     ComparisonResult,
     DocumentResult,
     OCRLine,
 )
-from app.text_utils import validate_nric_format
+from .text_utils import validate_nric_format
 
 
 MYKAD_FRONT_KEYWORDS = {

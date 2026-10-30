@@ -20,20 +20,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.datastructures import Headers
 
-from app.config import settings
-from app.image_quality import (
+from .config import settings
+from .image_quality import (
     check_image_quality,
     decode_image,
     preprocess_for_ocr,
 )
-from app.models import (
+from .models import (
     ProcessedImage,
     VerificationResponse,
 )
-from app.pdf_input import PdfInputError, render_pdf_pages
-from app.ocr_service import ocr_service
-from app.text_utils import validate_nric_format
-from app.verifier import (
+from .pdf_input import PdfInputError, render_pdf_pages
+from .ocr_service import ocr_service
+from .text_utils import validate_nric_format
+from .verifier import (
     average_ocr_confidence,
     compare_mykad_details,
     compare_passport_details,
@@ -43,7 +43,7 @@ from app.verifier import (
     evaluate_passport,
     mask_document_number,
 )
-from app.watermark_service import (
+from .watermark_service import (
     add_cidb_label,
     encode_image_as_data_url,
 )

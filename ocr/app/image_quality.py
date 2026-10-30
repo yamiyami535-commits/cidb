@@ -2,8 +2,8 @@
 import cv2
 import numpy as np
 
-from app.config import settings
-from app.models import QualityResult
+from .config import settings
+from .models import QualityResult
 
 
 def decode_image(file_bytes: bytes) -> np.ndarray:
