@@ -19,34 +19,13 @@ require_once dirname(__DIR__) . '/src/Ticketing/ClogAttachmentReference.php';
 require_once dirname(__DIR__) . '/src/Ticketing/ClogAttachmentDocumentStore.php';
 require_once dirname(__DIR__) . '/src/Ticketing/ClogConversationStore.php';
 
-$scopedCrmId = null;
-$cron2Mode = false;
-$allMode = false;
-foreach (array_slice($argv, 1) as $argument) {
-    if ($argument === '--all') {
-        $allMode = true;
-        continue;
-    }
-    if (str_starts_with($argument, '--crm-id=')) {
-        if ($scopedCrmId !== null) {
-            fwrite(STDERR, "Specify --crm-id only once.\n");
-            exit(2);
-        }
-        $scopedCrmId = trim(substr($argument, strlen('--crm-id=')));
-        if ($scopedCrmId === '' || strlen($scopedCrmId) > 255 || preg_match('/[\x00-\x1F\x7F]/', $scopedCrmId) === 1) {
-            fwrite(STDERR, "--crm-id must be a non-empty CRM ID of at most 255 characters.\n");
-            exit(2);
-        }
-        continue;
-    }
-    fwrite(STDERR, "Usage: php bin/cron_runner.php [--crm-id=CRM-ID] [--all]\n");
-    exit(2);
-}
 
 // Default to SIT 1 user test CRM-ID when not specified
 
-// Add support for Cron 2 (attachment‑OCR) mode
+// Add support for Cron 2 (attachment‑OCR) mode
 $cron2Mode = false;
+$scopedCrmId = null;
+$allMode = false;
 
 // Existing argument parsing – extend to recognise --cron2
 foreach (array_slice($argv, 1) as $argument) {
@@ -81,6 +60,151 @@ if ($scopedCrmId === null && !$allMode && !$cron2Mode) {
 
 if ($scopedCrmId === null && !$allMode) {
     $scopedCrmId = 'CRM-1793155923-92';
+}
+
+/**
+ * Open a fresh PostgreSQL connection.
+ * Used for the main connection and again for post-RPA writes, because the main
+ * connection can be dropped while we wait on the slow RPA HTTP call.
+ */
+function cidb_pg_connect(): PDO
+{
+    return new PDO(
+        sprintf(
+            'pgsql:host=%s;port=%d;dbname=%s;connect_timeout=%d;keepalives=1;keepalives_idle=30;keepalives_interval=10;keepalives_count=3',
+            env_value('DB_HOST'),
+            max(1, (int)env_value('DB_PORT', '5432')),
+            env_value('DB_DATABASE'),
+            max(1, (int)env_value('DB_TIMEOUT', '5'))
+        ),
+        env_value('DB_USERNAME'),
+        env_value('DB_PASSWORD'),
+        [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES => false,
+        ]
+    );
+}
+
+/**
+ * Persist the outcome of an RPA call on a FRESH Postgres connection (one retry).
+ * $row keys: ticket_id, dedupe_key, state, payload_json, response_json, error_code, event_json|null
+ */
+function cidb_record_rpa_result(array $row): bool
+{
+    $lastError = null;
+    for ($attempt = 1; $attempt <= 2; $attempt++) {
+        try {
+            $pdo = cidb_pg_connect();
+            $pdo->beginTransaction();
+
+            $queue = $pdo->prepare("
+                INSERT INTO portal_rpa_action_queue
+                    (ticket_id, action_type, dedupe_key, state, payload, response, error_code, updated_at)
+                VALUES
+                    (?, 'request_information', ?, ?, ?::jsonb, ?::jsonb, NULLIF(?, ''), NOW())
+                ON CONFLICT (dedupe_key) DO UPDATE SET
+                    state = EXCLUDED.state,
+                    payload = EXCLUDED.payload,
+                    response = EXCLUDED.response,
+                    error_code = EXCLUDED.error_code,
+                    updated_at = NOW()
+            ");
+            $queue->execute([
+                $row['ticket_id'],
+                $row['dedupe_key'],
+                $row['state'],
+                $row['payload_json'],
+                $row['response_json'],
+                $row['error_code'],
+            ]);
+
+            if ($row['event_json'] !== null) {
+                $event = $pdo->prepare("
+                    INSERT INTO portal_ticket_events (ticket_id, actor_type, event_type, metadata)
+                    VALUES (?, 'integration', 'ticket.rpa_action_submitted', ?::jsonb)
+                ");
+                $event->execute([$row['ticket_id'], $row['event_json']]);
+            }
+
+            $pdo->commit();
+            return true;
+        } catch (Throwable $e) {
+            $lastError = $e;
+            if (isset($pdo) && $pdo instanceof PDO) {
+                try {
+                    if ($pdo->inTransaction()) {
+                        $pdo->rollBack();
+                    }
+                } catch (Throwable $ignored) {
+                }
+            }
+            $pdo = null;
+        }
+    }
+
+    echo "   [RPA Bot Error] Could not record RPA result for ticket {$row['ticket_id']}: "
+        . ($lastError ? $lastError->getMessage() : 'unknown error') . "\n";
+    return false;
+}
+
+/**
+ * Call the RPA API for each queued job. Runs AFTER the batch transaction has
+ * been committed, so no DB transaction/connection is held open during slow HTTP calls.
+ */
+function cidb_dispatch_rpa_jobs(array $jobs): void
+{
+    foreach ($jobs as $job) {
+        $ticketId = (string)$job['ticket_id'];
+        $crmId = (string)$job['crm_id'];
+        $rpaInput = $job['input'];
+
+        $dedupeKey = 'clog:' . $crmId . ':request-information:' . hash('sha256', json_encode($rpaInput, JSON_THROW_ON_ERROR));
+
+        try {
+            $rpaClient = new \RpaClient();
+            $rpaPayload = $rpaClient->workflowPayload($rpaInput);
+            echo "   [RPA Bot] Triggering RPA API for {$crmId} ('Pending Customer Attachment')...\n";
+            $rpaResponse = $rpaClient->send($rpaPayload);
+            $parsed = $rpaResponse['parsed'];
+            $httpStatus = (int)($rpaResponse['http_status'] ?? 0);
+            $acknowledged = is_array($parsed) && strtolower((string)($parsed['status'] ?? '')) === 'inserted';
+            $scheduleId = is_array($parsed) && is_scalar($parsed['schedule_id'] ?? null) ? (string)$parsed['schedule_id'] : null;
+            $rpaState = $acknowledged ? 'succeeded' : (($httpStatus >= 400 && $httpStatus < 500) ? 'failed' : 'uncertain');
+            $errorCode = $acknowledged ? '' : ($rpaState === 'failed' ? 'RPA_REJECTED_REQUEST' : ($rpaResponse['error'] ?? 'RPA_OUTCOME_UNCONFIRMED'));
+
+            echo "   [RPA Bot] Result: {$rpaState}" . ($scheduleId ? " (Schedule ID: {$scheduleId})" : "") . ($errorCode ? " (Details: {$errorCode})" : "") . "\n";
+
+            $row = [
+                'ticket_id' => $ticketId,
+                'dedupe_key' => $dedupeKey,
+                'state' => $rpaState,
+                'payload_json' => json_encode($rpaPayload, JSON_THROW_ON_ERROR),
+                'response_json' => json_encode($rpaResponse, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
+                'error_code' => (string)$errorCode,
+                'event_json' => json_encode([
+                    'action_type' => 'request_information',
+                    'state' => $rpaState,
+                    'schedule_id' => $scheduleId,
+                    'http_status' => $httpStatus,
+                ], JSON_THROW_ON_ERROR),
+            ];
+        } catch (\Throwable $rpaErr) {
+            echo "   [RPA Bot Error] " . $rpaErr->getMessage() . "\n";
+            $row = [
+                'ticket_id' => $ticketId,
+                'dedupe_key' => $dedupeKey,
+                'state' => 'failed',
+                'payload_json' => json_encode($rpaInput, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
+                'response_json' => json_encode(['error' => $rpaErr->getMessage()], JSON_INVALID_UTF8_SUBSTITUTE) ?: '{}',
+                'error_code' => 'RPA_DISPATCH_EXCEPTION',
+                'event_json' => null,
+            ];
+        }
+
+        cidb_record_rpa_result($row);
+    }
 }
 
 function clog_sync_rows_by_values(PDO $pdo, string $table, string $column, array $values): array
@@ -223,22 +347,7 @@ try {
         }
     }
 
-    $pdo_pg = new PDO(
-        sprintf(
-            'pgsql:host=%s;port=%d;dbname=%s;connect_timeout=%d',
-            env_value('DB_HOST'),
-            max(1, (int)env_value('DB_PORT', '5432')),
-            env_value('DB_DATABASE'),
-            max(1, (int)env_value('DB_TIMEOUT', '5'))
-        ),
-        env_value('DB_USERNAME'),
-        env_value('DB_PASSWORD'),
-        [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-        ]
-    );
+    $pdo_pg = cidb_pg_connect();
 } catch (PDOException $e) {
     fwrite(STDERR, "Database connection error: {$e->getMessage()}\n");
     exit(1);
@@ -454,24 +563,6 @@ try {
         WHERE id=:ticket_id
     ");
 
-    $rpaActionQueueUpsert = $pdo_pg->prepare("
-        INSERT INTO portal_rpa_action_queue
-            (ticket_id, action_type, dedupe_key, state, payload, response, error_code, updated_at)
-        VALUES
-            (?, 'request_information', ?, ?, ?::jsonb, ?::jsonb, NULLIF(?, ''), NOW())
-        ON CONFLICT (dedupe_key) DO UPDATE SET
-            state = EXCLUDED.state,
-            payload = EXCLUDED.payload,
-            response = EXCLUDED.response,
-            error_code = EXCLUDED.error_code,
-            updated_at = NOW()
-    ");
-
-    $ticketEventInsert = $pdo_pg->prepare("
-        INSERT INTO portal_ticket_events (ticket_id, actor_type, event_type, metadata)
-        VALUES (?, 'integration', 'ticket.rpa_action_submitted', ?::jsonb)
-    ");
-
     $emailTagUpdate = $pdo_mysql->prepare("
         UPDATE `emails`
         SET `email_tagging` = ?
@@ -536,6 +627,10 @@ try {
         foreach (clog_sync_rows_by_values($pdo_mysql, 'ticketing_log', 'TicketID', array_values(array_unique($dataIds))) as $ticket) {
             $ticketsByData[(string)$ticket['TicketID']][] = $ticket;
         }
+
+        // RPA calls are queued here during the batch and dispatched AFTER commit,
+        // so no Postgres transaction is held open during slow HTTP calls.
+        $pendingRpaJobs = [];
 
         $pdo_pg->beginTransaction();
         try {
@@ -692,62 +787,22 @@ try {
 
                         echo "   [Ticket #{$ticketId}] No docs found. Tagged as 'Pending Customer' (workflow: needs_information).\n";
 
-                        // Trigger RPA API to dispatch guidelines/request docs
-                        $rpaClient = new \RpaClient();
-                        $rpaInput = [
-                            'action_type' => 'request_information',
-                            'crm' => $crmId,
-                            'email' => $address,
-                            'name' => $name,
-                            'customer_type' => $customerType,
-                            'id_number' => $identityNumber,
-                            'language' => $language,
-                            'state' => $state,
-                            'contact_number' => $phone,
+                        // Queue the RPA call; it is dispatched after this batch commits.
+                        $pendingRpaJobs[] = [
+                            'ticket_id' => $ticketId,
+                            'crm_id' => $crmId,
+                            'input' => [
+                                'action_type' => 'request_information',
+                                'crm' => $crmId,
+                                'email' => $address,
+                                'name' => $name,
+                                'customer_type' => $customerType,
+                                'id_number' => $identityNumber,
+                                'language' => $language,
+                                'state' => $state,
+                                'contact_number' => $phone,
+                            ],
                         ];
-
-                        try {
-                            $rpaPayload = $rpaClient->workflowPayload($rpaInput);
-                            echo "   [RPA Bot] Triggering RPA API for {$crmId} ('Pending Customer Attachment')...\n";
-                            $rpaResponse = $rpaClient->send($rpaPayload);
-                            $parsed = $rpaResponse['parsed'];
-                            $httpStatus = (int)($rpaResponse['http_status'] ?? 0);
-                            $acknowledged = is_array($parsed) && strtolower((string)($parsed['status'] ?? '')) === 'inserted';
-                            $scheduleId = is_array($parsed) && is_scalar($parsed['schedule_id'] ?? null) ? (string)$parsed['schedule_id'] : null;
-                            $rpaState = $acknowledged ? 'succeeded' : (($httpStatus >= 400 && $httpStatus < 500) ? 'failed' : 'uncertain');
-                            $errorCode = $acknowledged ? '' : ($rpaState === 'failed' ? 'RPA_REJECTED_REQUEST' : ($rpaResponse['error'] ?? 'RPA_OUTCOME_UNCONFIRMED'));
-
-                            echo "   [RPA Bot] Result: {$rpaState}" . ($scheduleId ? " (Schedule ID: {$scheduleId})" : "") . ($errorCode ? " (Details: {$errorCode})" : "") . "\n";
-
-                            $rpaActionQueueUpsert->execute([
-                                $ticketId,
-                                'clog:' . $crmId . ':request-information:' . hash('sha256', json_encode($rpaInput, JSON_THROW_ON_ERROR)),
-                                $rpaState,
-                                json_encode($rpaPayload, JSON_THROW_ON_ERROR),
-                                json_encode($rpaResponse, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
-                                $errorCode,
-                            ]);
-
-                            $ticketEventInsert->execute([
-                                $ticketId,
-                                json_encode([
-                                    'action_type' => 'request_information',
-                                    'state' => $rpaState,
-                                    'schedule_id' => $scheduleId,
-                                    'http_status' => $httpStatus,
-                                ], JSON_THROW_ON_ERROR),
-                            ]);
-                        } catch (\Throwable $rpaErr) {
-                            echo "   [RPA Bot Error] " . $rpaErr->getMessage() . "\n";
-                            $rpaActionQueueUpsert->execute([
-                                $ticketId,
-                                'clog:' . $crmId . ':request-information:' . hash('sha256', json_encode($rpaInput, JSON_THROW_ON_ERROR)),
-                                'failed',
-                                json_encode($rpaInput, JSON_THROW_ON_ERROR),
-                                json_encode(['error' => $rpaErr->getMessage()], JSON_THROW_ON_ERROR),
-                                'RPA_DISPATCH_EXCEPTION',
-                            ]);
-                        }
                     } else {
                         echo "   [Ticket #{$ticketId}] Found " . count($currentFiles) . " document(s). Validated and queued for OCR (workflow: ready_for_ocr).\n";
                     }
@@ -793,6 +848,12 @@ try {
                 $pdo_pg->rollBack();
             }
             throw $e;
+        }
+
+        // Batch is committed. Now it is safe to call the slow RPA API.
+        if ($pendingRpaJobs !== []) {
+            cidb_dispatch_rpa_jobs($pendingRpaJobs);
+            $pendingRpaJobs = [];
         }
     }
 
