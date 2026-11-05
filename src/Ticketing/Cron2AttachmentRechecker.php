@@ -8,6 +8,8 @@ use PDO;
 final class Cron2AttachmentRechecker
 {
     private const REPLIED_STATUSES = [
+        'Pending Customer Attachment',
+        'Pending Information',
         'Customer Replied - Verified',
         'Customer Replied - Document Reject',
     ];
@@ -18,7 +20,7 @@ final class Cron2AttachmentRechecker
         private readonly ClogAttachmentDocumentStore $documents
     ) {}
 
-    public function run(string $crmId, int $limit = 25): array
+    public function run(string $crmId, int $limit = 25, ?string $start = null, ?string $end = null): array
     {
         if (preg_match('/^CRM-[A-Za-z0-9-]{1,60}$/', $crmId) !== 1) {
             throw new \InvalidArgumentException('A valid CRM ID is required for Cron2 attachment recheck.');
@@ -34,11 +36,12 @@ final class Cron2AttachmentRechecker
             WHERE t.clog_crm_id = ?
               AND t.source_type = 'clog'
               AND t.customer_type = 'individual'
-              AND t.assigned_to IS NOT NULL
-              AND t.workflow_status IN ('needs_information', 'ocr_rejected')
+              AND t.workflow_status = 'needs_information'
               AND LOWER(TRIM(COALESCE(t.clog_status, i.clog_status, ''))) = 'open'
               AND i.current_status IN (
                   'Pending from Customer',
+                  'Pending Customer Attachment',
+                  'Pending Information',
                   'Customer Replied - Verified',
                   'Customer Replied - Document Reject'
               )
@@ -73,7 +76,7 @@ final class Cron2AttachmentRechecker
         $advance = $this->portalDb->prepare("
             UPDATE portal_tickets
             SET workflow_status = 'ready_for_ocr', updated_at = NOW()
-            WHERE id = ? AND workflow_status IN ('needs_information', 'ocr_rejected')
+            WHERE id = ? AND workflow_status = 'needs_information'
         ");
         $event = $this->portalDb->prepare("
             INSERT INTO portal_ticket_events (ticket_id, actor_type, event_type, metadata)
@@ -81,7 +84,9 @@ final class Cron2AttachmentRechecker
         ");
 
         // One CRM ID is in scope, so one CLOG lookup serves every matching ticket.
-        $files = $this->clog->lookup($crmId);
+        // Replies can be marked Closed by CLOG after agent handling; their
+        // same-day attachments still belong to the pending customer thread.
+        $files = $this->clog->lookup($crmId, $start, $end, true);
 
         foreach ($tickets as $ticket) {
             $existingQuery->execute([$ticket['id']]);

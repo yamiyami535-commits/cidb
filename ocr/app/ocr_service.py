@@ -21,6 +21,10 @@ class OCRService:
             use_doc_orientation_classify=True,
             use_doc_unwarping=True,
             use_textline_orientation=True,
+            # PaddleOCR's CPU oneDNN path currently fails on the local Paddle
+            # runtime for some PIR attributes. Standard CPU kernels preserve
+            # OCR behavior and keep the service runnable on Windows.
+            enable_mkldnn=False,
         )
 
     @staticmethod

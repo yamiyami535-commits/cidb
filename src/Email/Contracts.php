@@ -18,7 +18,7 @@ interface Rpa { public function send(array $payload): array; }
 interface Notifier { public function send(array $job): array; }
 interface ClogAttachmentProvider {
     /** @return array{email_ids:list<string>,files:list<array{email_id:string,crm_id:string,filename:string}>} */
-    public function lookup(string $crmId): array;
+    public function lookup(string $crmId, ?string $start = null, ?string $end = null, bool $includeClosed = false): array;
 }
 interface Store {
     public function lock(): bool;

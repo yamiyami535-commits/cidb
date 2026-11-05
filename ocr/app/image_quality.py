@@ -30,23 +30,11 @@ def check_image_quality(image: np.ndarray) -> QualityResult:
 
     issues: list[str] = []
 
-    if width < settings.min_image_width or height < settings.min_image_height:
-        issues.append(
-            f"Image resolution is too low. Minimum recommended resolution is "
-            f"{settings.min_image_width}x{settings.min_image_height}."
-        )
-
+    # The agreed automated gate is blur only. Scanned card copies often have
+    # large white margins, so brightness/glare and nominal dimensions must not
+    # turn a readable scan into a manual-review case.
     if blur_score < settings.min_blur_score:
         issues.append("The image is blurry. Hold the camera steady and try again.")
-
-    if brightness < settings.min_brightness:
-        issues.append("The image is too dark. Use better lighting.")
-
-    if brightness > settings.max_brightness:
-        issues.append("The image is too bright or overexposed.")
-
-    if bright_pixel_percentage > 45:
-        issues.append("Too much glare or reflection was detected.")
 
     return QualityResult(
         passed=len(issues) == 0,

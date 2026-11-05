@@ -78,16 +78,13 @@ Current `workflow_status` values are:
 | `intake_pending` | New / intake review |
 | `needs_information` | Needs information |
 | `ready_for_ocr` | Ready for OCR |
-| `ocr_processing` | OCR in progress |
-| `ocr_manual_review` | OCR manual review |
-| `ocr_rejected` | OCR needs review |
 | `ready_for_execution` | Ready for execution |
 | `execution_processing` | Execution in progress |
 | `completed` | Completed |
 | `failed` | Failed |
 | `closed` | Closed |
 
-These are allowed database values, not a guarantee that every transition or automation is implemented. The OCR worker is opt-in and leaves every processed ticket for human review; RPA execution and outbound customer messaging are not currently live.
+OCR state belongs to each document's `ocr_status` and `ocr_result`; it does not add values to the ticket workflow status. An identity match may show a document as `manual_review` in the frontend while still passing the automatic identity gate. Mismatches and unreadable documents do not pass that gate. CLOG agent `ReplyTo Mail` attachments remain thread history and are not customer OCR inputs.
 
 ## Queue / ticket-list query
 

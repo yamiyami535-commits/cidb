@@ -70,6 +70,12 @@ class VerificationResponse(BaseModel):
 
     extracted_document_number_masked: Optional[str] = None
 
+    # Full document number is returned only to the private portal worker so it
+    # can complete an otherwise-missing identity field for a verified case.
+    extracted_document_number: Optional[str] = None
+    extracted_name: Optional[str] = None
+    extracted_address: Optional[str] = None
+
     extracted_text_lines: Optional[list[str]] = None
 
     processed_images: Optional[

@@ -7,11 +7,17 @@ if (PHP_SAPI !== 'cli') {
 }
 
 require_once dirname(__DIR__) . '/src/bootstrap.php';
+require_once dirname(__DIR__) . '/src/RpaHubDirectInserter.php';
 
-function ocr_runner_crm_id_argument(): ?string
+function ocr_runner_crm_id_argument(): array
 {
     $crmId = null;
+    $backlog = false;
     foreach (array_slice($_SERVER['argv'] ?? [], 1) as $argument) {
+        if ($argument === '--backlog' && !$backlog) {
+            $backlog = true;
+            continue;
+        }
         if (!str_starts_with($argument, '--crm-id=')) {
             fwrite(STDERR, "Unknown argument. Use --crm-id=CRM-... to limit this run to one CRM ID.\n");
             exit(2);
@@ -23,7 +29,7 @@ function ocr_runner_crm_id_argument(): ?string
         }
         $crmId = $value;
     }
-    return $crmId;
+    return [$crmId, $backlog];
 }
 
 function ocr_runner_service_url(): string
@@ -82,6 +88,14 @@ function ocr_runner_fetch_document(string $url, int $maxBytes): string
             return strlen($chunk);
         },
     ]);
+    $caBundle = env_value('CLOG_FILE_CA_BUNDLE');
+    if ($caBundle !== '') {
+        if (!is_file($caBundle) || !is_readable($caBundle)) {
+            curl_close($curl);
+            throw new RuntimeException('CLOG_FILE_CA_BUNDLE must point to a readable CA bundle file.');
+        }
+        curl_setopt($curl, CURLOPT_CAINFO, $caBundle);
+    }
 
     $ok = curl_exec($curl);
     $status = (int)curl_getinfo($curl, CURLINFO_HTTP_CODE);
@@ -166,12 +180,17 @@ function ocr_runner_safe_result(array $response): array
     $safe = [
         'status' => $response['status'],
         'identity_check_verified' => $response['verified'],
-        'full_submission_checks' => 'manual_review_required',
+        'full_submission_checks' => 'identity_and_image_quality_only',
         'message' => $response['message'],
     ];
     foreach (['document_type', 'extracted_document_number_masked', 'ocr_average_confidence'] as $key) {
         if (isset($response[$key]) && is_scalar($response[$key])) {
             $safe[$key] = $response[$key];
+        }
+    }
+    foreach (['extracted_name', 'extracted_address'] as $key) {
+        if (isset($response[$key]) && is_string($response[$key])) {
+            $safe[$key] = mb_substr(trim($response[$key]), 0, 500);
         }
     }
     if (isset($response['images_quality']) && is_array($response['images_quality'])) {
@@ -210,7 +229,10 @@ function ocr_runner_document_status(string $status): string
     };
 }
 
-$crmId = ocr_runner_crm_id_argument();
+[$crmId, $backlogMode] = ocr_runner_crm_id_argument();
+$timezone = new DateTimeZone(env_value('CLOG_TIMEZONE', 'Asia/Kuala_Lumpur'));
+$todayStart = (new DateTimeImmutable('today', $timezone))->format('Y-m-d H:i:sP');
+$tomorrowStart = (new DateTimeImmutable('today', $timezone))->modify('+1 day')->format('Y-m-d H:i:sP');
 if (!filter_var(env_value('OCR_ENABLED', 'false'), FILTER_VALIDATE_BOOLEAN)) {
     fwrite(STDOUT, "OCR worker is disabled. Set OCR_ENABLED=true after configuring the private OCR service.\n");
     exit(0);
@@ -256,14 +278,19 @@ try {
                i.applicant_name AS interaction_name, i.nric AS interaction_nric
         FROM portal_tickets t
         LEFT JOIN cidb_interaction_data i ON i.id = t.interaction_id
-        WHERE t.assigned_to IS NOT NULL
-          AND t.workflow_status = 'ready_for_ocr'
+        WHERE t.workflow_status = 'ready_for_ocr'
+          AND t.customer_type = 'individual'
+          AND t.scenario_key = 'cancellation-individual'
           AND LOWER(TRIM(COALESCE(t.clog_status, i.clog_status, ''))) = 'open'
           AND EXISTS (
               SELECT 1 FROM portal_ticket_documents d
+              JOIN cidb_email_messages m ON m.id = d.email_message_id
               WHERE d.ticket_id = t.id
                 AND d.reference_status = 'ready'
                 AND d.ocr_status = 'pending'
+                AND m.source_system = 'clog'
+                AND LOWER(TRIM(COALESCE(m.source_email_type, ''))) IN ('new email', 'reply mail')
+                " . ($backlogMode ? "" : "AND d.updated_at >= CAST(:today_start AS timestamptz) AND d.updated_at < CAST(:tomorrow_start AS timestamptz)") . "
           )
           " . ($crmId !== null ? "AND t.clog_crm_id = :crm_id" : "") . "
         ORDER BY t.updated_at, t.id
@@ -271,6 +298,10 @@ try {
     ");
     if ($crmId !== null) {
         $candidateQuery->bindValue(':crm_id', $crmId, PDO::PARAM_STR);
+    }
+    if (!$backlogMode) {
+        $candidateQuery->bindValue(':today_start', $todayStart, PDO::PARAM_STR);
+        $candidateQuery->bindValue(':tomorrow_start', $tomorrowStart, PDO::PARAM_STR);
     }
     $candidateQuery->bindValue(':limit', $batchSize, PDO::PARAM_INT);
     $candidateQuery->execute();
@@ -285,11 +316,17 @@ try {
         SELECT id, original_filename, retrieval_url, reference_status, ocr_status
         FROM portal_ticket_documents
         WHERE ticket_id = ? AND reference_status = 'ready' AND ocr_status = 'pending'
+          AND EXISTS (
+              SELECT 1 FROM cidb_email_messages m
+              WHERE m.id = portal_ticket_documents.email_message_id
+                AND m.source_system = 'clog'
+                AND LOWER(TRIM(COALESCE(m.source_email_type, ''))) IN ('new email', 'reply mail')
+          )
+          " . ($backlogMode ? "" : "AND updated_at >= ?::timestamptz AND updated_at < ?::timestamptz") . "
         ORDER BY created_at, id
     ");
     $ticketReview = $pdo->prepare("
-        UPDATE portal_tickets SET workflow_status = 'ocr_manual_review', updated_at = NOW()
-        WHERE id = ? AND workflow_status = 'ready_for_ocr'
+        UPDATE portal_tickets SET updated_at = NOW() WHERE id = ? AND workflow_status = 'ready_for_ocr'
     ");
 
     $enqueued = 0;
@@ -298,18 +335,14 @@ try {
         $name = trim((string)($candidate['applicant_name'] ?: $candidate['interaction_name'] ?: ''));
         $identityNumber = trim((string)($candidate['id_number'] ?: $candidate['interaction_nric'] ?: ''));
 
-        $documentQuery->execute([$candidate['id']]);
+        $documentQuery->execute($backlogMode ? [$candidate['id']] : [$candidate['id'], $todayStart, $tomorrowStart]);
         $documents = $documentQuery->fetchAll();
         if ($documents === []) {
             continue;
         }
 
-        $inputType = 'unsupported';
-        $state = 'manual_review';
-        if (count($documents) === 1 && ocr_runner_extension((string)$documents[0]['original_filename']) === 'pdf') {
-            $inputType = $identityNumber === '' ? 'cancellation_form_pdf' : 'mykad_pdf';
-            $state = 'queued';
-        } elseif (count($documents) === 2) {
+        $groups = [];
+        if (count($documents) === 2 && $name !== '' && $identityNumber !== '') {
             $frontIndex = null;
             $backIndex = null;
             $hasUnsupportedFile = false;
@@ -327,40 +360,45 @@ try {
                 }
             }
             if (!$hasUnsupportedFile && $frontIndex !== null && $backIndex !== null) {
-                $documents = [$documents[$frontIndex], $documents[$backIndex]];
-                $inputType = 'mykad_image_pair';
-                $state = 'queued';
+                $groups[] = [
+                    'input_type' => 'mykad_image_pair',
+                    'state' => 'queued',
+                    'documents' => [$documents[$frontIndex], $documents[$backIndex]],
+                ];
             }
         }
-        if ($inputType !== 'cancellation_form_pdf' && ($name === '' || $identityNumber === '')) {
-            $skippedIdentity++;
-            fwrite(STDERR, 'Ticket ' . $candidate['id'] . " is missing a mapped name or NRIC; identity OCR not started.\n");
-            continue;
+        if ($groups === []) {
+            foreach ($documents as $document) {
+                $extension = ocr_runner_extension((string)$document['original_filename']);
+                if ($extension === 'pdf') {
+                    $groups[] = ['input_type' => 'cancellation_form_pdf', 'state' => 'queued', 'documents' => [$document]];
+                } elseif (in_array($extension, ['jpg', 'jpeg', 'png', 'webp'], true)) {
+                    $groups[] = ['input_type' => 'mykad_image', 'state' => 'queued', 'documents' => [$document]];
+                } else {
+                    $groups[] = ['input_type' => 'unsupported', 'state' => 'manual_review', 'documents' => [$document]];
+                }
+            }
         }
 
-        $documentIds = array_map(static fn(array $document): string => (string)$document['id'], $documents);
-        $documentIdsJson = json_encode($documentIds, JSON_THROW_ON_ERROR);
-        $dedupeKey = 'ticket:' . $candidate['id'] . ':ocr:' . hash('sha256', implode(':', $documentIds));
-        $enqueue->execute([
-            $documents[0]['id'],
-            $dedupeKey,
-            $state,
-            json_encode(['input_type' => $inputType, 'document_ids' => $documentIds], JSON_THROW_ON_ERROR),
-        ]);
-        $inserted = $enqueue->rowCount() === 1;
-        if ($inserted) {
-            $enqueued++;
-        }
-        if ($state === 'manual_review') {
-            $documentPlaceholders = implode(',', array_fill(0, count($documentIds), '?'));
-            $manualReview = $pdo->prepare("
-                UPDATE portal_ticket_documents
-                SET ocr_status = 'manual_review', updated_at = NOW()
-                WHERE id IN ({$documentPlaceholders})
-            ");
-            $manualReview->execute($documentIds);
-            $ticketReview->execute([$candidate['id']]);
-            fwrite(STDOUT, 'Ticket ' . $candidate['id'] . " requires manual file identification; OCR not started.\n");
+        foreach ($groups as $group) {
+            $groupDocuments = $group['documents'];
+            $documentIds = array_map(static fn(array $document): string => (string)$document['id'], $groupDocuments);
+            $dedupeKey = 'ticket:' . $candidate['id'] . ':ocr:' . hash('sha256', implode(':', $documentIds));
+            $enqueue->execute([
+                $groupDocuments[0]['id'],
+                $dedupeKey,
+                $group['state'],
+                json_encode(['input_type' => $group['input_type'], 'document_ids' => $documentIds], JSON_THROW_ON_ERROR),
+            ]);
+            if ($enqueue->rowCount() === 1) {
+                $enqueued++;
+            }
+            if ($group['state'] === 'manual_review') {
+                $placeholders = implode(',', array_fill(0, count($documentIds), '?'));
+                $pdo->prepare("UPDATE portal_ticket_documents SET ocr_status='manual_review',updated_at=NOW() WHERE id IN ({$placeholders})")
+                    ->execute($documentIds);
+                $ticketReview->execute([$candidate['id']]);
+            }
         }
     }
 
@@ -369,16 +407,23 @@ try {
         $pdo->beginTransaction();
         $jobQuery = $pdo->prepare("
             SELECT j.id, d.ticket_id, j.document_id, j.request_payload,
-                   t.applicant_name, t.id_number, t.clog_crm_id, t.interaction_id,
-                   i.applicant_name AS interaction_name, i.nric AS interaction_nric
+                   t.applicant_name, t.applicant_email, t.contact_number, t.language,
+                   t.id_number, t.clog_crm_id, t.interaction_id, t.customer_type, t.scenario_key,
+                   i.applicant_name AS interaction_name, i.nric AS interaction_nric,
+                   i.email AS interaction_email, i.phone AS interaction_phone, i.language AS interaction_language
             FROM portal_ticket_ocr_jobs j
             JOIN portal_ticket_documents d ON d.id = j.document_id
+            JOIN cidb_email_messages m ON m.id = d.email_message_id
             JOIN portal_tickets t ON t.id = d.ticket_id
             LEFT JOIN cidb_interaction_data i ON i.id = t.interaction_id
-            WHERE j.state = 'queued'
-              AND t.assigned_to IS NOT NULL
+            WHERE (j.state = 'queued' OR (j.state = 'failed' AND j.attempts < 10 AND j.next_attempt_at <= NOW()))
               AND t.workflow_status = 'ready_for_ocr'
+              AND t.customer_type = 'individual'
+              AND t.scenario_key = 'cancellation-individual'
               AND LOWER(TRIM(COALESCE(t.clog_status, i.clog_status, ''))) = 'open'
+              AND m.source_system = 'clog'
+              AND LOWER(TRIM(COALESCE(m.source_email_type, ''))) IN ('new email', 'reply mail')
+              " . ($backlogMode ? "" : "AND d.updated_at >= CAST(:today_start AS timestamptz) AND d.updated_at < CAST(:tomorrow_start AS timestamptz)") . "
               " . ($crmId !== null ? "AND t.clog_crm_id = :crm_id" : "") . "
             ORDER BY j.created_at, j.id
             LIMIT 1
@@ -386,6 +431,10 @@ try {
         ");
         if ($crmId !== null) {
             $jobQuery->bindValue(':crm_id', $crmId, PDO::PARAM_STR);
+        }
+        if (!$backlogMode) {
+            $jobQuery->bindValue(':today_start', $todayStart, PDO::PARAM_STR);
+            $jobQuery->bindValue(':tomorrow_start', $tomorrowStart, PDO::PARAM_STR);
         }
         $jobQuery->execute();
         $job = $jobQuery->fetch();
@@ -398,10 +447,6 @@ try {
             SET state = 'dispatching', attempts = attempts + 1, started_at = NOW(), updated_at = NOW()
             WHERE id = ?
         ")->execute([$job['id']]);
-        $pdo->prepare("
-            UPDATE portal_tickets SET workflow_status = 'ocr_processing', updated_at = NOW()
-            WHERE id = ? AND workflow_status = 'ready_for_ocr'
-        ")->execute([$job['ticket_id']]);
         $pdo->commit();
 
         $temporaryFiles = [];
@@ -412,11 +457,11 @@ try {
             $documentIds = $payload['document_ids'] ?? [];
             $inputType = $payload['input_type'] ?? null;
             if (!is_array($documentIds)
-                || !in_array($inputType, ['mykad_pdf', 'mykad_image_pair', 'cancellation_form_pdf'], true)
-                || count($documentIds) !== (in_array($inputType, ['mykad_pdf', 'cancellation_form_pdf'], true) ? 1 : 2)) {
+                || !in_array($inputType, ['mykad_pdf', 'mykad_image', 'mykad_image_pair', 'cancellation_form_pdf'], true)
+                || count($documentIds) !== (in_array($inputType, ['mykad_pdf', 'mykad_image', 'cancellation_form_pdf'], true) ? 1 : 2)) {
                 throw new RuntimeException('OCR job has no attachment references.');
             }
-            if ($inputType !== 'cancellation_form_pdf' && ($name === '' || $identityNumber === '')) {
+            if ($inputType === 'mykad_image_pair' && ($name === '' || $identityNumber === '')) {
                 throw new RuntimeException('Mapped customer name or NRIC is missing.');
             }
             foreach ($documentIds as $documentId) {
@@ -442,8 +487,11 @@ try {
             $maxBytes = in_array($inputType, ['mykad_pdf', 'cancellation_form_pdf'], true)
                 ? $maxDownloadBytes
                 : max(1, (int)env_value('OCR_MAX_FILE_SIZE_MB', '8')) * 1024 * 1024;
-            $fields = $inputType === 'cancellation_form_pdf'
-                ? []
+            $fields = in_array($inputType, ['cancellation_form_pdf', 'mykad_image'], true)
+                ? array_filter([
+                    'entered_name' => $name !== '' ? $name : null,
+                    'entered_nric' => $identityNumber !== '' ? $identityNumber : null,
+                ], static fn(?string $value): bool => $value !== null)
                 : ['document_type' => 'mykad', 'entered_name' => $name, 'entered_nric' => $identityNumber];
 
             foreach ($files as $index => $file) {
@@ -464,6 +512,11 @@ try {
                         throw new RuntimeException('The downloaded attachment is not a PDF.');
                     }
                     $fields['document_pdf'] = new CURLFile($temporaryPath, $contentType, basename((string)$file['original_filename']));
+                } elseif ($inputType === 'mykad_image') {
+                    if (!str_starts_with($contentType, 'image/')) {
+                        throw new RuntimeException('The single MyKad image has an unsupported type.');
+                    }
+                    $fields['image_file'] = new CURLFile($temporaryPath, $contentType, basename((string)$file['original_filename']));
                 } else {
                     if (count($files) !== 2 || !str_starts_with($contentType, 'image/')) {
                         throw new RuntimeException('The MyKad image pair is incomplete or unsupported.');
@@ -478,15 +531,15 @@ try {
             $endpoint = $serviceUrl . match ($inputType) {
                 'cancellation_form_pdf' => '/api/verify-cancellation-form-pdf',
                 'mykad_pdf' => '/api/verify-mykad-pdf',
+                'mykad_image' => '/api/verify-mykad-image',
                 default => '/api/verify-document',
             };
             $response = ocr_runner_request($endpoint, $fields);
             $safeResult = ocr_runner_safe_result($response);
             $ocrStatus = ocr_runner_document_status((string)$response['status']);
             if ($response['status'] === 'VERIFIED') {
-                $safeResult['status'] = 'MANUAL_REVIEW';
-                $safeResult['full_submission_checks'] = 'cross_out_signature_stamp_not_automated';
-                $safeResult['message'] = 'Identity OCR matched. CIDB cross-out, company stamp, and signature still require human review.';
+                $safeResult['status'] = 'VERIFIED';
+                $safeResult['full_submission_checks'] = 'identity_name_nric_and_image_quality_passed';
                 $ocrStatus = 'manual_review';
             }
 
@@ -507,10 +560,36 @@ try {
                 json_encode($safeResult, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
                 ...$documentIds,
             ]);
-            $pdo->prepare("
-                UPDATE portal_tickets SET workflow_status = 'ocr_manual_review', updated_at = NOW()
-                WHERE id = ? AND workflow_status = 'ocr_processing'
-            ")->execute([$job['ticket_id']]);
+            $extractedNumber = preg_replace('/\D+/', '', (string)($response['extracted_document_number'] ?? '')) ?? '';
+            $extractedName = trim((string)($response['extracted_name'] ?? ''));
+            $extractedAddress = trim((string)($response['extracted_address'] ?? ''));
+            if (strlen($extractedNumber) === 12) {
+                $pdo->prepare("
+                    UPDATE portal_tickets
+                    SET id_number = COALESCE(NULLIF(TRIM(id_number), ''), ?),
+                        applicant_name = COALESCE(NULLIF(TRIM(applicant_name), ''), NULLIF(?, '')),
+                        source_data = source_data || jsonb_build_object('ocr_extraction', ?::jsonb),
+                        updated_at = NOW()
+                    WHERE id = ?
+                ")->execute([
+                    $extractedNumber,
+                    $extractedName,
+                    json_encode([
+                        'name' => $extractedName !== '' ? $extractedName : null,
+                        'address' => $extractedAddress !== '' ? $extractedAddress : null,
+                        'document_number_masked' => $safeResult['extracted_document_number_masked'] ?? null,
+                    ], JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
+                    $job['ticket_id'],
+                ]);
+                $pdo->prepare("
+                    UPDATE cidb_interaction_data
+                    SET nric = COALESCE(NULLIF(TRIM(nric), ''), ?),
+                        applicant_name = COALESCE(NULLIF(TRIM(applicant_name), ''), NULLIF(?, '')),
+                        updated_at = NOW()
+                    WHERE id = ?
+                ")->execute([$extractedNumber, $extractedName, $job['interaction_id']]);
+                $identityNumber = $identityNumber !== '' ? $identityNumber : $extractedNumber;
+            }
             $pdo->prepare("
                 INSERT INTO portal_ticket_events
                     (ticket_id, actor_type, event_type, metadata)
@@ -521,7 +600,47 @@ try {
             ]);
             $pdo->commit();
             $processed++;
-            fwrite(STDOUT, 'OCR completed for ticket ' . $job['ticket_id'] . ': ' . $safeResult['status'] . ". Manual review remains required; no RPA request was sent.\n");
+            $rpaResult = null;
+            $attachmentCheck = $pdo->prepare("
+                SELECT count(*) AS document_count,
+                       COALESCE(bool_and(ocr_status IN ('valid', 'manual_review')
+                           AND COALESCE(ocr_result->>'identity_check_verified' = 'true', false)), false) AS all_verified
+                FROM portal_ticket_documents d
+                JOIN cidb_email_messages m ON m.id = d.email_message_id
+                WHERE d.ticket_id = ? AND d.reference_status = 'ready'
+                  AND m.source_system = 'clog'
+                  AND LOWER(TRIM(COALESCE(m.source_email_type, ''))) IN ('new email', 'reply mail')
+            ");
+            $attachmentCheck->execute([$job['ticket_id']]);
+            $attachmentResult = $attachmentCheck->fetch(PDO::FETCH_ASSOC);
+            if ($response['verified'] === true
+                && $job['customer_type'] === 'individual'
+                && $job['scenario_key'] === 'cancellation-individual'
+                && (int)$attachmentResult['document_count'] > 0
+                && filter_var($attachmentResult['all_verified'], FILTER_VALIDATE_BOOLEAN)
+                && $name !== '' && $identityNumber !== '') {
+                try {
+                    $botInput = RpaHubDirectInserter::buildBotInput([
+                        'crm' => $job['clog_crm_id'],
+                        'email' => $job['applicant_email'] ?: $job['interaction_email'],
+                        'name' => $name,
+                    'id_number' => $identityNumber !== '' ? $identityNumber : $extractedNumber,
+                        'contact_number' => $job['contact_number'] ?: $job['interaction_phone'],
+                        'language' => $job['language'] ?: $job['interaction_language'],
+                        'customer_type' => 'individual',
+                    ], 'Email Cancel');
+                    $rpaResult = (new RpaHubDirectInserter())->insert($botInput);
+                    $pdo->prepare("UPDATE cidb_interaction_data SET current_status = 'Customer Replied - Verified', updated_at = NOW() WHERE id = ?")
+                        ->execute([$job['interaction_id']]);
+                    $pdo->prepare("UPDATE portal_tickets SET workflow_status = 'ready_for_execution', updated_at = NOW() WHERE id = ? AND workflow_status = 'ready_for_ocr'")
+                        ->execute([$job['ticket_id']]);
+                } catch (Throwable $rpaError) {
+                    fwrite(STDERR, 'OCR verified but direct RPA insertion will retry on a later run: ' . $rpaError->getMessage() . "\n");
+                    $exitCode = 1;
+                }
+            }
+            fwrite(STDOUT, 'OCR completed for ticket ' . $job['ticket_id'] . ': ' . $safeResult['status']
+                . ($rpaResult !== null ? '; RPA Hub ' . $rpaResult['status'] . ' (' . ($rpaResult['schedule_id'] ?? 'duplicate') . ')' : '') . ".\n");
         } catch (Throwable $error) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
@@ -529,7 +648,8 @@ try {
             $pdo->beginTransaction();
             $pdo->prepare("
                 UPDATE portal_ticket_ocr_jobs
-                SET state = 'failed', error_code = ?, completed_at = NOW(), updated_at = NOW()
+                SET state = 'failed', error_code = ?, next_attempt_at = NOW() + INTERVAL '30 minutes',
+                    completed_at = NOW(), updated_at = NOW()
                 WHERE id = ?
             ")->execute(['OCR_WORKER_ERROR', $job['id']]);
             $payload = json_decode((string)$job['request_payload'], true);
@@ -542,10 +662,6 @@ try {
                 UPDATE portal_ticket_documents SET ocr_status = 'error', updated_at = NOW()
                 WHERE id IN ({$documentPlaceholders})
             ")->execute($documentIds);
-            $pdo->prepare("
-                UPDATE portal_tickets SET workflow_status = 'ocr_manual_review', updated_at = NOW()
-                WHERE id = ? AND workflow_status = 'ocr_processing'
-            ")->execute([$job['ticket_id']]);
             $pdo->commit();
             fwrite(STDERR, 'OCR failed for ticket ' . $job['ticket_id'] . ': ' . $error->getMessage() . "\n");
             $exitCode = 1;
@@ -559,8 +675,88 @@ try {
         }
     }
 
+    $verifiedSql = "
+        SELECT DISTINCT t.id, t.clog_crm_id, t.applicant_name, t.applicant_email,
+               t.id_number, t.contact_number, t.language, t.interaction_id,
+               i.applicant_name AS interaction_name, i.nric AS interaction_nric,
+               i.email AS interaction_email, i.phone AS interaction_phone,
+               i.language AS interaction_language
+        FROM portal_tickets t
+        JOIN cidb_interaction_data i ON i.id = t.interaction_id
+        WHERE t.source_type = 'clog' AND t.customer_type = 'individual'
+          AND t.scenario_key = 'cancellation-individual'
+          AND t.workflow_status = 'ready_for_ocr'
+          AND LOWER(TRIM(COALESCE(t.clog_status, i.clog_status, ''))) = 'open'
+          AND EXISTS (
+              SELECT 1 FROM portal_ticket_documents d
+              JOIN cidb_email_messages m ON m.id = d.email_message_id
+              WHERE d.ticket_id = t.id AND d.reference_status = 'ready'
+                AND m.source_system = 'clog'
+                AND LOWER(TRIM(COALESCE(m.source_email_type, ''))) IN ('new email', 'reply mail')
+                " . ($backlogMode ? "" : "AND d.updated_at >= CAST(:today_start AS timestamptz) AND d.updated_at < CAST(:tomorrow_start AS timestamptz)") . "
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM portal_ticket_documents d
+              JOIN cidb_email_messages m ON m.id = d.email_message_id
+              WHERE d.ticket_id = t.id AND d.reference_status = 'ready'
+                AND m.source_system = 'clog'
+                AND LOWER(TRIM(COALESCE(m.source_email_type, ''))) IN ('new email', 'reply mail')
+                AND (d.ocr_status NOT IN ('valid', 'manual_review')
+                     OR COALESCE(d.ocr_result->>'identity_check_verified' = 'true', false) = false)
+          )
+          AND i.current_status IS DISTINCT FROM 'Customer Replied - Verified'
+          " . ($crmId !== null ? "AND t.clog_crm_id = :verified_crm" : "") . "
+        ORDER BY t.id LIMIT 100
+    ";
+    $verifiedQuery = $pdo->prepare($verifiedSql);
+    if ($crmId !== null) {
+        $verifiedQuery->bindValue(':verified_crm', $crmId, PDO::PARAM_STR);
+    }
+    if (!$backlogMode) {
+        $verifiedQuery->bindValue(':today_start', $todayStart, PDO::PARAM_STR);
+        $verifiedQuery->bindValue(':tomorrow_start', $tomorrowStart, PDO::PARAM_STR);
+    }
+    $verifiedQuery->execute();
+    foreach ($verifiedQuery->fetchAll(PDO::FETCH_ASSOC) as $verified) {
+        $name = trim((string)($verified['applicant_name'] ?: $verified['interaction_name'] ?: ''));
+        $identityNumber = trim((string)($verified['id_number'] ?: $verified['interaction_nric'] ?: ''));
+        $attachmentCheck = $pdo->prepare("
+            SELECT count(*)
+            FROM portal_ticket_documents d
+            JOIN cidb_email_messages m ON m.id = d.email_message_id
+            WHERE d.ticket_id = ? AND d.reference_status = 'ready'
+              AND m.source_system = 'clog'
+              AND LOWER(TRIM(COALESCE(m.source_email_type, ''))) IN ('new email', 'reply mail')
+        ");
+        $attachmentCheck->execute([$verified['id']]);
+        if ($name === '' || $identityNumber === '' || (int)$attachmentCheck->fetchColumn() < 1) {
+            fwrite(STDERR, 'Verified ticket ' . $verified['id'] . " is missing RPA identity fields or a ready attachment; insert blocked.\n");
+            continue;
+        }
+        try {
+            $botInput = RpaHubDirectInserter::buildBotInput([
+                'crm' => $verified['clog_crm_id'],
+                'email' => $verified['applicant_email'] ?: $verified['interaction_email'],
+                'name' => $name,
+                'id_number' => $identityNumber,
+                'contact_number' => $verified['contact_number'] ?: $verified['interaction_phone'],
+                'language' => $verified['language'] ?: $verified['interaction_language'],
+                'customer_type' => 'individual',
+            ], 'Email Cancel');
+            $insertResult = (new RpaHubDirectInserter())->insert($botInput);
+            $pdo->prepare("UPDATE cidb_interaction_data SET current_status = 'Customer Replied - Verified', updated_at = NOW() WHERE id = ?")
+                ->execute([$verified['interaction_id']]);
+            $pdo->prepare("UPDATE portal_tickets SET workflow_status = 'ready_for_execution', updated_at = NOW() WHERE id = ? AND workflow_status = 'ready_for_ocr'")
+                ->execute([$verified['id']]);
+            fwrite(STDOUT, 'RPA Hub ' . $insertResult['status'] . ' for verified cancellation ' . $verified['clog_crm_id'] . ".\n");
+        } catch (Throwable $rpaError) {
+            fwrite(STDERR, 'Direct RPA insert failed for ' . $verified['clog_crm_id'] . ': ' . $rpaError->getMessage() . "\n");
+            $exitCode = 1;
+        }
+    }
+
     $scopeMessage = $crmId === null ? 'all eligible CRMs' : 'CRM ' . $crmId;
-    fwrite(STDOUT, "OCR worker finished for {$scopeMessage}: {$enqueued} jobs prepared, {$processed} jobs processed, {$skippedIdentity} tickets skipped for missing identity fields. RPA remains disabled.\n");
+    fwrite(STDOUT, "OCR worker finished for {$scopeMessage}: {$enqueued} jobs prepared, {$processed} jobs processed, {$skippedIdentity} tickets skipped for missing identity fields.\n");
 } catch (Throwable $error) {
     fwrite(STDERR, 'OCR worker error: ' . $error->getMessage() . "\n");
     $exitCode = 1;

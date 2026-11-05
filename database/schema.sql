@@ -51,3 +51,4 @@ CREATE INDEX ix_portal_requests_rpa_reference ON portal_requests (rpa_reference_
 \ir migrations/20261022_clog_open_status.sql
 \ir migrations/20261023_ticket_conversation_foundation.sql
 \ir migrations/20261027_ocr_manual_review.sql
+\ir migrations/20261105_cleanup_ocr_ticket_statuses.sql

@@ -141,7 +141,7 @@ final class TicketManualReview
             $this->assertReviewable($ticket);
             $this->pdo->prepare("
                 UPDATE portal_tickets
-                SET workflow_status = 'ocr_rejected',
+                SET workflow_status = 'needs_information',
                     execution_result = (
                         COALESCE(execution_result, '{}'::jsonb)
                         - ARRAY['approved_by', 'approved_at', 'ocr_status']
@@ -160,7 +160,7 @@ final class TicketManualReview
             $this->event($ticket['id'], $user['id'], 'ticket.manual_review_rejected', [
                 'reason' => $reason,
             ]);
-            return ['ticket_id' => $ticket['id'], 'workflow_status' => 'ocr_rejected'];
+            return ['ticket_id' => $ticket['id'], 'workflow_status' => 'needs_information'];
         });
     }
 
@@ -169,8 +169,8 @@ final class TicketManualReview
         if ($ticket['customer_type'] !== 'individual') {
             throw new \RuntimeException('SIT manual approval is restricted to individually classified tickets.');
         }
-        if ($ticket['workflow_status'] !== 'ocr_manual_review') {
-            throw new \RuntimeException('Ticket must be in ocr_manual_review before approval or rejection.');
+        if ($ticket['workflow_status'] !== 'ready_for_ocr') {
+            throw new \RuntimeException('Ticket must be ready_for_ocr before approval or rejection.');
         }
         if ($ticket['assigned_to'] === null) {
             throw new \RuntimeException('Assign the ticket to a portal reviewer before manual review.');

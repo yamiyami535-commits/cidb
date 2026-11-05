@@ -11,7 +11,7 @@ if (PHP_SAPI !== 'cli') {
 }
 
 require_once dirname(__DIR__) . '/src/bootstrap.php';
-require_once dirname(__DIR__) . '/src/RpaClient.php';
+require_once dirname(__DIR__) . '/src/RpaHubDirectInserter.php';
 require_once dirname(__DIR__) . '/src/Ticketing/CancellationDetector.php';
 require_once dirname(__DIR__) . '/src/Ticketing/ClogCaseStatus.php';
 require_once dirname(__DIR__) . '/src/Ticketing/ClogIdentityExtractor.php';
@@ -26,11 +26,21 @@ require_once dirname(__DIR__) . '/src/Ticketing/ClogConversationStore.php';
 $cron2Mode = false;
 $scopedCrmId = null;
 $allMode = false;
+$backlogMode = false;
+$skipRpaDispatch = false;
 
 // Existing argument parsing – extend to recognise --cron2
 foreach (array_slice($argv, 1) as $argument) {
     if ($argument === '--all') {
         $allMode = true;
+        continue;
+    }
+    if ($argument === '--skip-rpa-dispatch') {
+        $skipRpaDispatch = true;
+        continue;
+    }
+    if ($argument === '--backlog') {
+        $backlogMode = true;
         continue;
     }
     if (str_starts_with($argument, '--crm-id=')) {
@@ -49,17 +59,32 @@ foreach (array_slice($argv, 1) as $argument) {
         $cron2Mode = true;
         continue;
     }
-    fwrite(STDERR, "Usage: php bin/cron_runner.php [--crm-id=CRM-ID] [--all] [--cron2]\n");
+    fwrite(STDERR, "Usage: php bin/cron_runner.php [--crm-id=CRM-ID] [--all] [--backlog] [--cron2] [--skip-rpa-dispatch]\n");
     exit(2);
 }
 
-// Default to SIT 1 user test CRM-ID when not specified
-if ($scopedCrmId === null && !$allMode && !$cron2Mode) {
-    $scopedCrmId = 'CRM-1793155923-92';
+if ($skipRpaDispatch && ($scopedCrmId === null || $allMode || $cron2Mode)) {
+    fwrite(STDERR, "--skip-rpa-dispatch requires one scoped --crm-id and cannot be combined with --all or --cron2.\n");
+    exit(2);
+}
+if ($allMode && $scopedCrmId !== null) {
+    fwrite(STDERR, "Use --all or --crm-id, not both.\n");
+    exit(2);
 }
 
-if ($scopedCrmId === null && !$allMode) {
-    $scopedCrmId = 'CRM-1793155923-92';
+if ($cron2Mode) {
+    $cron2Runner = __DIR__ . DIRECTORY_SEPARATOR . 'cron2_recheck.php';
+    $commandLine = escapeshellarg(PHP_BINARY)
+        . ' -d extension_dir=' . escapeshellarg((string)ini_get('extension_dir'))
+        . ' ' . escapeshellarg($cron2Runner) . ' run';
+    if ($scopedCrmId !== null) {
+        $commandLine .= ' ' . escapeshellarg('--crm-id=' . $scopedCrmId);
+    }
+    if ($backlogMode) {
+        $commandLine .= ' --backlog';
+    }
+    passthru($commandLine, $cron2ExitCode);
+    exit($cron2ExitCode);
 }
 
 /**
@@ -149,60 +174,50 @@ function cidb_record_rpa_result(array $row): bool
     return false;
 }
 
-/**
- * Call the RPA API for each queued job. Runs AFTER the batch transaction has
- * been committed, so no DB transaction/connection is held open during slow HTTP calls.
- */
-function cidb_dispatch_rpa_jobs(array $jobs): void
+function cidb_bot_input(array $input, string $request): array
+{
+    return RpaHubDirectInserter::buildBotInput($input, $request);
+}
+
+function cidb_direct_rpa_jobs(array $jobs): void
 {
     foreach ($jobs as $job) {
         $ticketId = (string)$job['ticket_id'];
         $crmId = (string)$job['crm_id'];
-        $rpaInput = $job['input'];
-
-        $dedupeKey = 'clog:' . $crmId . ':request-information:' . hash('sha256', json_encode($rpaInput, JSON_THROW_ON_ERROR));
-
+        $botInput = cidb_bot_input($job['input'], 'Pending Customer Attachment');
+        $dedupeKey = 'clog:' . $crmId . ':request-information:' . hash('sha256', json_encode($botInput, JSON_THROW_ON_ERROR));
         try {
-            $rpaClient = new \RpaClient();
-            $rpaPayload = $rpaClient->workflowPayload($rpaInput);
-            echo "   [RPA Bot] Triggering RPA API for {$crmId} ('Pending Customer Attachment')...\n";
-            $rpaResponse = $rpaClient->send($rpaPayload);
-            $parsed = $rpaResponse['parsed'];
-            $httpStatus = (int)($rpaResponse['http_status'] ?? 0);
-            $acknowledged = is_array($parsed) && strtolower((string)($parsed['status'] ?? '')) === 'inserted';
-            $scheduleId = is_array($parsed) && is_scalar($parsed['schedule_id'] ?? null) ? (string)$parsed['schedule_id'] : null;
-            $rpaState = $acknowledged ? 'succeeded' : (($httpStatus >= 400 && $httpStatus < 500) ? 'failed' : 'uncertain');
-            $errorCode = $acknowledged ? '' : ($rpaState === 'failed' ? 'RPA_REJECTED_REQUEST' : ($rpaResponse['error'] ?? 'RPA_OUTCOME_UNCONFIRMED'));
-
-            echo "   [RPA Bot] Result: {$rpaState}" . ($scheduleId ? " (Schedule ID: {$scheduleId})" : "") . ($errorCode ? " (Details: {$errorCode})" : "") . "\n";
-
+            $result = (new RpaHubDirectInserter())->insert($botInput);
+            $scheduleId = $result['schedule_id'] ?? null;
+            echo "   [RPA Hub DB] {$result['status']} for {$crmId}" . ($scheduleId ? " (Schedule ID: {$scheduleId})" : '') . ".\n";
+            $statusDb = cidb_pg_connect();
+            $statusDb->prepare("UPDATE cidb_interaction_data SET current_status = 'Pending Customer Attachment', updated_at = NOW() WHERE crm_id = ? AND current_status NOT IN ('Customer Replied - Verified', 'Customer Replied - Document Reject')")
+                ->execute([$crmId]);
             $row = [
                 'ticket_id' => $ticketId,
                 'dedupe_key' => $dedupeKey,
-                'state' => $rpaState,
-                'payload_json' => json_encode($rpaPayload, JSON_THROW_ON_ERROR),
-                'response_json' => json_encode($rpaResponse, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
-                'error_code' => (string)$errorCode,
+                'state' => 'succeeded',
+                'payload_json' => json_encode($botInput, JSON_THROW_ON_ERROR),
+                'response_json' => json_encode($result, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
+                'error_code' => '',
                 'event_json' => json_encode([
                     'action_type' => 'request_information',
-                    'state' => $rpaState,
+                    'state' => 'succeeded',
                     'schedule_id' => $scheduleId,
-                    'http_status' => $httpStatus,
                 ], JSON_THROW_ON_ERROR),
             ];
-        } catch (\Throwable $rpaErr) {
-            echo "   [RPA Bot Error] " . $rpaErr->getMessage() . "\n";
+        } catch (Throwable $error) {
+            echo "   [RPA Hub DB Error] " . get_class($error) . " for {$crmId}.\n";
             $row = [
                 'ticket_id' => $ticketId,
                 'dedupe_key' => $dedupeKey,
                 'state' => 'failed',
-                'payload_json' => json_encode($rpaInput, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
-                'response_json' => json_encode(['error' => $rpaErr->getMessage()], JSON_INVALID_UTF8_SUBSTITUTE) ?: '{}',
-                'error_code' => 'RPA_DISPATCH_EXCEPTION',
+                'payload_json' => json_encode($botInput, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
+                'response_json' => json_encode(['error' => get_class($error)], JSON_THROW_ON_ERROR),
+                'error_code' => 'RPA_DIRECT_INSERT_FAILED',
                 'event_json' => null,
             ];
         }
-
         cidb_record_rpa_result($row);
     }
 }
@@ -219,7 +234,7 @@ function clog_sync_rows_by_values(PDO $pdo, string $table, string $column, array
     return $stmt->fetchAll();
 }
 
-function clog_sync_emails_by_crm_ids(PDO $pdo, array $crmIds, bool $openOnly = false): array
+function clog_sync_emails_by_crm_ids(PDO $pdo, array $crmIds, bool $openOnly = false, ?string $start = null, ?string $end = null): array
 {
     if ($crmIds === []) {
         return [];
@@ -227,14 +242,79 @@ function clog_sync_emails_by_crm_ids(PDO $pdo, array $crmIds, bool $openOnly = f
 
     $placeholders = implode(',', array_fill(0, count($crmIds), '?'));
     $statusFilter = $openOnly ? " AND LOWER(TRIM(`case_status`)) = 'open'" : '';
+    $dateFilter = $start !== null && $end !== null ? ' AND `time` >= ? AND `time` < ?' : '';
     $stmt = $pdo->prepare("
         SELECT *
         FROM `emails`
-        WHERE `uniqid` IN ({$placeholders}){$statusFilter}
+        WHERE `uniqid` IN ({$placeholders})
+          AND LOWER(TRIM(COALESCE(`emailtype`, ''))) IN ('new email', 'reply mail')
+          {$statusFilter}{$dateFilter}
         ORDER BY `time` ASC, `id` ASC
     ");
-    $stmt->execute(array_values($crmIds));
+    $params = array_values($crmIds);
+    if ($dateFilter !== '') {
+        $params[] = $start;
+        $params[] = $end;
+    }
+    $stmt->execute($params);
     return $stmt->fetchAll();
+}
+
+function clog_sync_customer_type_from_data(array $dataRows): string
+{
+    $hasIndividualType = false;
+    foreach ($dataRows as $row) {
+        $type = strtolower(trim((string)($row['CustomerType'] ?? '')));
+        $category = strtolower(trim((string)($row['Column8'] ?? '')));
+        if (str_contains($type, 'company') || str_contains($type, 'syarikat')
+            || str_contains($category, 'syarikat')) {
+            return 'company';
+        }
+        if ($type !== '') {
+            if (str_starts_with($type, 'individual') || str_starts_with($type, 'individu')) {
+                $hasIndividualType = true;
+            } else {
+                return 'unknown';
+            }
+        }
+    }
+    return $hasIndividualType ? 'individual' : 'unknown';
+}
+
+function clog_sync_is_individual_cancellation(array $emailRow, array $dataRows): bool
+{
+    if (strtolower(trim((string)($emailRow['emailtype'] ?? ''))) === 'replyto mail') {
+        return false;
+    }
+    if (clog_sync_customer_type_from_data($dataRows) !== 'individual') {
+        return false;
+    }
+    $categoryConfirmsCancellation = false;
+    foreach ($dataRows as $row) {
+        $category = strtolower(trim((string)($row['Column8'] ?? '')));
+        if (str_contains($category, 'syarikat') || str_contains($category, 'company')) {
+            return false;
+        }
+        if (str_contains($category, 'pembatalan')
+            && (str_contains($category, 'id') || str_contains($category, 'kad pengenalan'))
+            && (str_contains($category, 'individu') || str_contains($category, 'individual'))) {
+            $categoryConfirmsCancellation = true;
+        }
+    }
+    // CLOG can retain a cancellation category while the same CRM thread later
+    // receives a different request. Explicit reset/change intents on today's
+    // email take precedence over that stale category.
+    $currentText = strtolower(implode(' ', array_filter(array_map(
+        static fn(mixed $value): string => is_string($value) ? $value : '',
+        array_values($emailRow)
+    ))));
+    if (preg_match('/\b(reset|password|kata laluan|tukar e-?mel|tukar emel|change of e-?mail|change e-?mail|kemaskini e-?mel|kemaskini emel|forgot password|unlock account|permohonan baru|new application|already exists)\b/i', $currentText) === 1) {
+        return false;
+    }
+    if (\Cidb\Ticketing\CancellationDetector::matches($emailRow)) {
+        return true;
+    }
+    return $categoryConfirmsCancellation;
 }
 
 function clog_sync_ticket_attachments(
@@ -305,6 +385,8 @@ if ($initialSyncDays === false || $initialSyncDays < 0) {
     fwrite(STDERR, "CLOG_INITIAL_SYNC_DAYS must be a non-negative integer.\n");
     exit(1);
 }
+$todayStart = (new DateTimeImmutable('today', $sourceTimezone))->format('Y-m-d H:i:s');
+$tomorrowStart = (new DateTimeImmutable('today', $sourceTimezone))->modify('+1 day')->format('Y-m-d H:i:s');
 
 try {
     $mysqlDb = env_value('CLOG_DB_DATABASE');
@@ -401,47 +483,40 @@ try {
     if ($cursor < $initialCutoff) {
         $cursor = $initialCutoff;
     }
-    $cursorTime = $scopedCrmId === null
+    $cursorTime = $backlogMode && $scopedCrmId === null
         ? $cursor->setTimezone($sourceTimezone)->format('Y-m-d H:i:s')
-        : '1000-01-01 00:00:00';
+        : ($backlogMode ? '1000-01-01 00:00:00' : $todayStart);
     $cursorId = '0';
     $processedCount = 0;
     $cancellationCount = 0;
     $attachmentReferenceCount = 0;
     $invalidAttachmentReferenceCount = 0;
+    $todayCrmIds = [];
     $batchCount = 0;
     $batchSize = 500;
     $syncStartedAt = microtime(true);
-    if ($scopedCrmId === null) {
-        echo '   Reading emails from ' . $cursorTime . " ({$sourceTimezoneName}) in batches of {$batchSize}...\n";
+    if ($backlogMode) {
+        echo "   [AD HOC BACKLOG] Reading records outside the normal today-only window.\n";
     } else {
-        echo "   [SIT Mode] Scoped to CRM ID: {$scopedCrmId}. Global sync cursor will not be changed.\n";
+        echo "   [TODAY ONLY] Reading open CLOG emails from {$todayStart} until {$tomorrowStart} ({$sourceTimezoneName}).\n";
+    }
+    if ($scopedCrmId !== null) {
+        echo "   Scoped to CRM ID: {$scopedCrmId}. Global sync cursor will not be changed.\n";
     }
     if (defined('STDOUT')) {
         fflush(STDOUT);
     }
 
-    $emailQuery = $pdo_mysql->prepare($scopedCrmId === null
-        ? "
-            SELECT *
-            FROM `emails`
-            WHERE `time` >= ?
-              AND (`time` > ? OR (`time` = ? AND `id` > ?))
-              AND `uniqid` IS NOT NULL
-              AND TRIM(`uniqid`) <> ''
-            ORDER BY `time` ASC, `id` ASC
-            LIMIT {$batchSize}
-        "
-        : "
-            SELECT *
-            FROM `emails`
-            WHERE `uniqid` = ?
-              AND LOWER(TRIM(COALESCE(`case_status`, ''))) = 'open'
-              AND (`time` > ? OR (`time` = ? AND `id` > ?))
-            ORDER BY `time` ASC, `id` ASC
-            LIMIT {$batchSize}
-        "
-    );
+    if ($backlogMode && $scopedCrmId === null) {
+        $emailSql = "SELECT * FROM `emails` WHERE `time` >= ? AND (`time` > ? OR (`time` = ? AND `id` > ?)) AND `uniqid` IS NOT NULL AND TRIM(`uniqid`) <> '' ORDER BY `time`,`id` LIMIT {$batchSize}";
+    } elseif ($backlogMode) {
+        $emailSql = "SELECT * FROM `emails` WHERE `uniqid` = ? AND LOWER(TRIM(COALESCE(`case_status`,'')))='open' AND (`time` > ? OR (`time` = ? AND `id` > ?)) ORDER BY `time`,`id` LIMIT {$batchSize}";
+    } elseif ($scopedCrmId === null) {
+        $emailSql = "SELECT * FROM `emails` WHERE `time` >= ? AND `time` < ? AND LOWER(TRIM(COALESCE(`case_status`,'')))='open' AND (`time` > ? OR (`time` = ? AND `id` > ?)) AND `uniqid` IS NOT NULL AND TRIM(`uniqid`) <> '' ORDER BY `time`,`id` LIMIT {$batchSize}";
+    } else {
+        $emailSql = "SELECT * FROM `emails` WHERE `uniqid` = ? AND `time` >= ? AND `time` < ? AND LOWER(TRIM(COALESCE(`case_status`,'')))='open' AND (`time` > ? OR (`time` = ? AND `id` > ?)) ORDER BY `time`,`id` LIMIT {$batchSize}";
+    }
+    $emailQuery = $pdo_mysql->prepare($emailSql);
 
     $fileUpsert = $pdo_pg->prepare("
         INSERT INTO cidb_interaction_data
@@ -458,7 +533,7 @@ try {
             language = COALESCE(EXCLUDED.language, cidb_interaction_data.language),
             company_name = COALESCE(EXCLUDED.company_name, cidb_interaction_data.company_name),
             company_no = COALESCE(EXCLUDED.company_no, cidb_interaction_data.company_no),
-            current_status = COALESCE(EXCLUDED.current_status, cidb_interaction_data.current_status),
+            current_status = COALESCE(cidb_interaction_data.current_status, EXCLUDED.current_status),
             clog_status = COALESCE(EXCLUDED.clog_status, cidb_interaction_data.clog_status),
             updated_at = NOW()
     ");
@@ -486,20 +561,6 @@ try {
         VALUES (?, 'CLOG_STATUS_CHANGE', ?, ?::jsonb)
     ");
 
-    $pendingScenarioBucket = $pdo_pg->prepare("
-        SELECT id
-        FROM portal_ticket_buckets
-        WHERE scenario_key = 'cancellation-classification-pending'
-          AND is_default = true
-          AND is_active = true
-        LIMIT 1
-    ");
-    $pendingScenarioBucket->execute();
-    $pendingBucketId = $pendingScenarioBucket->fetchColumn();
-    if (!$pendingBucketId) {
-        throw new RuntimeException("Missing default ticket bucket for cancellation classification.");
-    }
-
     $scenarioBucketLookup = $pdo_pg->prepare("
         SELECT id
         FROM portal_ticket_buckets
@@ -522,7 +583,12 @@ try {
             scenario_key = EXCLUDED.scenario_key,
             bucket_id = EXCLUDED.bucket_id,
             customer_type = EXCLUDED.customer_type,
-            workflow_status = EXCLUDED.workflow_status,
+            workflow_status = CASE
+                WHEN portal_tickets.workflow_status IN ('intake_pending', 'needs_information')
+                     AND EXCLUDED.workflow_status = 'ready_for_ocr'
+                THEN 'ready_for_ocr'
+                ELSE portal_tickets.workflow_status
+            END,
             clog_status = EXCLUDED.clog_status,
             clog_crm_id = EXCLUDED.clog_crm_id,
             applicant_name = COALESCE(portal_tickets.applicant_name, EXCLUDED.applicant_name),
@@ -562,6 +628,7 @@ try {
             updated_at=NOW()
         WHERE id=:ticket_id
     ");
+    $readyDocumentCount = $pdo_pg->prepare("SELECT count(*) FROM portal_ticket_documents WHERE ticket_id = ? AND reference_status = 'ready'");
 
     $emailTagUpdate = $pdo_mysql->prepare("
         UPDATE `emails`
@@ -580,10 +647,16 @@ try {
         if (defined('STDOUT')) {
             fflush(STDOUT);
         }
-        $emailQuery->execute($scopedCrmId === null
-            ? [$cursorTime, $cursorTime, $cursorTime, $cursorId]
-            : [$scopedCrmId, $cursorTime, $cursorTime, $cursorId]
-        );
+        if ($backlogMode) {
+            $emailQuery->execute($scopedCrmId === null
+                ? [$cursorTime, $cursorTime, $cursorTime, $cursorId]
+                : [$scopedCrmId, $cursorTime, $cursorTime, $cursorId]
+            );
+        } elseif ($scopedCrmId === null) {
+            $emailQuery->execute([$todayStart, $tomorrowStart, $cursorTime, $cursorTime, $cursorId]);
+        } else {
+            $emailQuery->execute([$scopedCrmId, $todayStart, $tomorrowStart, $cursorTime, $cursorTime, $cursorId]);
+        }
         $emails = $emailQuery->fetchAll();
         if ($emails === []) {
             echo "   No more matching emails.\n";
@@ -608,6 +681,16 @@ try {
             $filename = (string)$file['filename'];
             $filesByEmail[$emailKey][] = $filename;
             $fileRowsByEmail[$emailKey][] = $file;
+        }
+        $caseHasAttachments = [];
+        foreach ($emails as $sourceEmail) {
+            $sourceCrmId = trim((string)($sourceEmail['uniqid'] ?? ''));
+            $sourceEmailId = (string)$sourceEmail['id'];
+            $todayCrmIds[$sourceCrmId] = true;
+            if (in_array(strtolower(trim((string)($sourceEmail['emailtype'] ?? ''))), ['new email', 'reply mail'], true)
+                && ($filesByEmail[$sourceEmailId] ?? []) !== []) {
+                $caseHasAttachments[$sourceCrmId] = true;
+            }
         }
 
         $dataByCrm = [];
@@ -657,6 +740,9 @@ try {
                 $language = $extracted['language'];
 
                 $relatedData = $dataByCrm[$crmId] ?? [];
+                // CLOG's stored case type is authoritative. Email subjects and
+                // display names must not promote a company or unknown case to Individual.
+                $customerType = clog_sync_customer_type_from_data($relatedData);
                 $relatedDataIds = array_map(static fn(array $row): string => (string)$row['ID'], $relatedData);
                 $relatedActivity = [];
                 $relatedTickets = [];
@@ -712,12 +798,15 @@ try {
                     ]);
                 }
 
-                if (\Cidb\Ticketing\CancellationDetector::matches($emailRow)
+                if (clog_sync_is_individual_cancellation($emailRow, $relatedData)
                     && \Cidb\Ticketing\ClogCaseStatus::isOpen($caseStatus)) {
 
-                    $scenarioKey = $customerType === 'individual' ? 'cancellation-individual' : ($customerType === 'company' ? 'cancellation-company' : 'cancellation-classification-pending');
+                    $scenarioKey = 'cancellation-individual';
                     $scenarioBucketLookup->execute([$scenarioKey]);
-                    $bucketId = $scenarioBucketLookup->fetchColumn() ?: $pendingBucketId;
+                    $bucketId = $scenarioBucketLookup->fetchColumn();
+                    if (!$bucketId) {
+                        throw new RuntimeException('The individual cancellation bucket is not configured.');
+                    }
 
                     $missingFields = [];
                     if (!$hasDocs) {
@@ -778,31 +867,33 @@ try {
                     );
 
                     if (!$hasDocs) {
-                        // Tag as 'Pending Customer' in MySQL emails table
-                        try {
-                            $emailTagUpdate->execute(['Pending Customer', $emailId]);
-                        } catch (\Throwable $tagErr) {
-                            // Non-fatal if table column is restricted
+                        $readyDocumentCount->execute([$ticketId]);
+                        $threadHasPortalDocument = (int)$readyDocumentCount->fetchColumn() > 0;
+                        if (!isset($caseHasAttachments[$crmId]) && !$threadHasPortalDocument) {
+                            try {
+                                $emailTagUpdate->execute(['Pending Customer', $emailId]);
+                            } catch (\Throwable $tagErr) {
+                                // CLOG tagging is informational; the portal ticket remains authoritative.
+                            }
+                            echo "   [Ticket #{$ticketId}] No attachment exists on today's CLOG thread; staging the exact request-information payload.\n";
+                            $pendingRpaJobs[] = [
+                                'ticket_id' => $ticketId,
+                                'crm_id' => $crmId,
+                                'input' => [
+                                    'action_type' => 'request_information',
+                                    'crm' => $crmId,
+                                    'email' => $address,
+                                    'name' => $name,
+                                    'customer_type' => 'individual',
+                                    'id_number' => $identityNumber,
+                                    'language' => $language,
+                                    'state' => $state,
+                                    'contact_number' => $phone,
+                                ],
+                            ];
+                        } else {
+                            echo "   [Ticket #{$ticketId}] No attachment on this email, but an attachment exists elsewhere in today's thread or portal; no request was sent.\n";
                         }
-
-                        echo "   [Ticket #{$ticketId}] No docs found. Tagged as 'Pending Customer' (workflow: needs_information).\n";
-
-                        // Queue the RPA call; it is dispatched after this batch commits.
-                        $pendingRpaJobs[] = [
-                            'ticket_id' => $ticketId,
-                            'crm_id' => $crmId,
-                            'input' => [
-                                'action_type' => 'request_information',
-                                'crm' => $crmId,
-                                'email' => $address,
-                                'name' => $name,
-                                'customer_type' => $customerType,
-                                'id_number' => $identityNumber,
-                                'language' => $language,
-                                'state' => $state,
-                                'contact_number' => $phone,
-                            ],
-                        ];
                     } else {
                         echo "   [Ticket #{$ticketId}] Found " . count($currentFiles) . " document(s). Validated and queued for OCR (workflow: ready_for_ocr).\n";
                     }
@@ -816,7 +907,7 @@ try {
 
             $lastEmail = $emails[array_key_last($emails)];
             $lastSourceTime = clog_sync_timestamp((string)$lastEmail['time'], $sourceTimezone);
-            if ($scopedCrmId === null) {
+            if ($backlogMode && $scopedCrmId === null) {
                 $advanceCursor->execute([
                     $lastSourceTime->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:sP'),
                 ]);
@@ -850,29 +941,34 @@ try {
             throw $e;
         }
 
-        // Batch is committed. Now it is safe to call the slow RPA API.
+        // Batch is committed before writing to the separate RPA Hub database.
         if ($pendingRpaJobs !== []) {
-            cidb_dispatch_rpa_jobs($pendingRpaJobs);
+            if ($skipRpaDispatch) {
+                echo '   RPA dispatch skipped for ' . count($pendingRpaJobs) . " request-information job(s) by explicit CLI option.\n";
+            } else {
+                cidb_direct_rpa_jobs($pendingRpaJobs);
+            }
             $pendingRpaJobs = [];
         }
     }
 
-    $ticketScope = $scopedCrmId === null ? '' : ' AND clog_crm_id = :crm_id';
+    $ticketCrmIds = array_keys($todayCrmIds);
+    if ($ticketCrmIds === []) {
+        $clogTickets = [];
+    } else {
+    $ticketPlaceholders = implode(',', array_fill(0, count($ticketCrmIds), '?'));
     $clogTicketsQuery = $pdo_pg->prepare("
         SELECT id, clog_crm_id
         FROM portal_tickets
-        WHERE clog_crm_id IS NOT NULL{$ticketScope}
-          AND (
-              (source_type = 'clog' AND LOWER(TRIM(COALESCE(clog_status, ''))) = 'open')
-              OR source_type = 'email'
-          )
+        WHERE source_type = 'clog'
+          AND customer_type = 'individual'
+          AND scenario_key = 'cancellation-individual'
+          AND LOWER(TRIM(COALESCE(clog_status, ''))) = 'open'
+          AND clog_crm_id IN ({$ticketPlaceholders})
     ");
-    if ($scopedCrmId === null) {
-        $clogTicketsQuery->execute();
-    } else {
-        $clogTicketsQuery->execute(['crm_id' => $scopedCrmId]);
-    }
+    $clogTicketsQuery->execute($ticketCrmIds);
     $clogTickets = $clogTicketsQuery->fetchAll();
+    }
     foreach (array_chunk($clogTickets, 500) as $ticketChunk) {
         $chunkCrmIds = array_values(array_unique(array_map(
             static fn(array $ticket): string => (string)$ticket['clog_crm_id'],
@@ -880,7 +976,13 @@ try {
         )));
         $emailsByCrm = [];
         $crmByEmail = [];
-        foreach (clog_sync_emails_by_crm_ids($pdo_mysql, $chunkCrmIds, true) as $sourceEmail) {
+        foreach (clog_sync_emails_by_crm_ids(
+            $pdo_mysql,
+            $chunkCrmIds,
+            true,
+            $backlogMode ? null : $todayStart,
+            $backlogMode ? null : $tomorrowStart
+        ) as $sourceEmail) {
             $crmId = (string)$sourceEmail['uniqid'];
             $emailId = (string)$sourceEmail['id'];
             $emailsByCrm[$crmId][] = $emailId;

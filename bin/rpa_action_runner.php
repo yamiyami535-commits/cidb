@@ -7,7 +7,7 @@ if (PHP_SAPI !== 'cli') {
 }
 
 require dirname(__DIR__) . '/src/bootstrap.php';
-require dirname(__DIR__) . '/src/RpaClient.php';
+require dirname(__DIR__) . '/src/RpaHubDirectInserter.php';
 
 $command = $argv[1] ?? 'check';
 if (!in_array($command, ['check', 'dry-run', 'run'], true)) {
@@ -16,18 +16,9 @@ if (!in_array($command, ['check', 'dry-run', 'run'], true)) {
 }
 
 $enabled = filter_var(env_value('RPA_WORKFLOW_ACTIONS_ENABLED', 'false'), FILTER_VALIDATE_BOOLEAN);
-$endpoint = env_value('RPA_BOT_ENDPOINT');
 if ($command === 'run') {
     if (!$enabled) {
         fwrite(STDERR, "RPA workflow dispatch is disabled. Set RPA_WORKFLOW_ACTIONS_ENABLED=true after approval.\n");
-        exit(2);
-    }
-    if (strtolower((string)parse_url($endpoint, PHP_URL_SCHEME)) !== 'https') {
-        fwrite(STDERR, "RPA workflow dispatch requires an HTTPS endpoint.\n");
-        exit(2);
-    }
-    if (!extension_loaded('curl')) {
-        fwrite(STDERR, "The PHP cURL extension is required for RPA workflow dispatch.\n");
         exit(2);
     }
 }
@@ -40,7 +31,7 @@ try {
 }
 
 if ($command === 'check') {
-    echo "Database connection passed. RPA workflow dispatch is " . ($enabled ? "enabled" : "disabled") . ". No RPA request sent.\n";
+    echo "Database connection passed. Direct RPA Hub DB insertion is " . ($enabled ? "enabled" : "disabled") . ". No scheduler row inserted.\n";
     exit(0);
 }
 
@@ -108,7 +99,10 @@ function rpa_action_candidate(PDO $pdo, bool $claim, array $skipIds = []): ?arra
                            AND COALESCE(d.ocr_result->>'identity_check_verified' = 'true', false)
                        ) AS all_documents_verified
                 FROM portal_ticket_documents d
+                JOIN cidb_email_messages m ON m.id = d.email_message_id
                 WHERE d.ticket_id = t.id AND d.reference_status = 'ready'
+                  AND m.source_system = 'clog'
+                  AND LOWER(TRIM(COALESCE(m.source_email_type, ''))) IN ('new email', 'reply mail')
             ) documents ON true
             WHERE q.state = 'queued' AND q.next_attempt_at <= NOW()
               {$skipSql}
@@ -159,6 +153,9 @@ function rpa_action_candidate(PDO $pdo, bool $claim, array $skipIds = []): ?arra
 
 function rpa_action_reason(array $candidate): ?string
 {
+    if ($candidate['ticket_customer_type'] !== 'individual') {
+        return 'RPA_REVIEW_INDIVIDUAL_ONLY';
+    }
     if ($candidate['action_type'] === 'request_information') {
         if ((int)$candidate['file_count'] !== 0) {
             return 'RPA_REVIEW_ATTACHMENT_PRESENT';
@@ -284,7 +281,11 @@ try {
         }
 
         try {
-            $payload = (new RpaClient())->workflowPayload(rpa_action_input($candidate));
+            $input = rpa_action_input($candidate);
+            $request = $candidate['action_type'] === 'request_information'
+                ? 'Pending Customer Attachment'
+                : 'Email Cancel';
+            $botInput = RpaHubDirectInserter::buildBotInput($input, $request);
         } catch (Throwable $error) {
             if ($command === 'run') {
                 $hold = $pdo->prepare("
@@ -300,26 +301,15 @@ try {
         }
 
         if ($command === 'dry-run') {
-            echo "dry-run: action is eligible; payload not displayed and no RPA request sent.\n";
+            echo "dry-run: action is eligible; exact Bot_Input not displayed and no row inserted.\n";
             $processed++;
             break;
         }
 
-        $response = (new RpaClient())->send($payload);
-        $parsed = $response['parsed'];
-        $status = (int)($response['http_status'] ?? 0);
-        $acknowledged = is_array($parsed) && strtolower((string)($parsed['status'] ?? '')) === 'inserted';
-        $scheduleId = is_array($parsed) && is_scalar($parsed['schedule_id'] ?? null)
-            ? (string)$parsed['schedule_id']
-            : null;
-        $state = $acknowledged ? 'succeeded' : (($status >= 400 && $status < 500) ? 'failed' : 'uncertain');
-        $errorCode = $acknowledged ? '' : ($state === 'failed' ? 'RPA_REJECTED_REQUEST' : 'RPA_OUTCOME_UNCONFIRMED');
-        rpa_action_finish($pdo, $candidate, $state, $errorCode, [
-            'http_status' => $response['http_status'],
-            'schedule_id' => $scheduleId,
-            'acknowledged' => $acknowledged,
-        ]);
-        echo "RPA action " . $state . "; schedule reference " . ($scheduleId ?? 'unavailable') . ".\n";
+        $result = (new RpaHubDirectInserter())->insert($botInput);
+        $scheduleId = $result['schedule_id'] ?? null;
+        rpa_action_finish($pdo, $candidate, 'succeeded', '', $result);
+        echo "RPA Hub DB " . $result['status'] . "; schedule reference " . ($scheduleId ?? 'unavailable') . ".\n";
         $processed++;
     }
 } catch (Throwable $error) {

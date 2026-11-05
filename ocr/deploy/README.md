@@ -73,16 +73,18 @@ database are ready, then set `OCR_SERVICE_URL` to the private HTTPS origin,
 `OCR_MAX_PDF_SIZE_MB=16`. Do not use localhost when portal and OCR run on
 separate machines.
 
-The worker sends the mapped customer name and NRIC, plus either a two-page
-`document_pdf` or identified front/back images. It stores only a limited OCR
-summary. No RPA request is made; the ticket remains in manual review because
-the CIDB-use cross-out, company stamp, and director signature are not yet
-machine-checked.
+The worker sends the mapped customer name and NRIC, plus the eligible CLOG
+customer attachment. It stores a limited OCR summary and extracts name, NRIC,
+and address where readable. `ocr_status='manual_review'` is the existing
+document status shown in the frontend; a verified identity can pass the
+automatic RPA gate. The OCR service does not check the CIDB-use cross-out,
+signature, or company stamp.
 
 Before enabling the worker on an existing portal database, have the database
 owner apply the ticket foundation migrations in order, followed by
 `database/migrations/20261027_ocr_manual_review.sql`. This guide does not run
-migrations.
+migrations. Apply `database/migrations/20261105_cleanup_ocr_ticket_statuses.sql`
+after it to remove the deprecated OCR ticket workflow statuses.
 
 ## Verify deployment
 

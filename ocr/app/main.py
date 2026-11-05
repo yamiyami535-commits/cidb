@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 import hmac
 from io import BytesIO
 from pathlib import Path
+import re
 import traceback
 from typing import Any
 
@@ -71,6 +72,9 @@ def build_verification_response(
     comparison: Any | None = None,
     ocr_average_confidence: float | None = None,
     extracted_document_number_masked: str | None = None,
+    extracted_document_number: str | None = None,
+    extracted_name: str | None = None,
+    extracted_address: str | None = None,
     extracted_text_lines: list[str] | None = None,
     processed_images: list[ProcessedImage] | None = None,
 ) -> VerificationResponse:
@@ -84,6 +88,9 @@ def build_verification_response(
         comparison=comparison,
         ocr_average_confidence=ocr_average_confidence,
         extracted_document_number_masked=extracted_document_number_masked,
+        extracted_document_number=extracted_document_number,
+        extracted_name=extracted_name,
+        extracted_address=extracted_address,
         extracted_text_lines=extracted_text_lines,
         processed_images=processed_images,
     )
@@ -101,6 +108,9 @@ def verification_json_response(
     comparison: Any | None = None,
     ocr_average_confidence: float | None = None,
     extracted_document_number_masked: str | None = None,
+    extracted_document_number: str | None = None,
+    extracted_name: str | None = None,
+    extracted_address: str | None = None,
     extracted_text_lines: list[str] | None = None,
     processed_images: list[ProcessedImage] | None = None,
 ) -> JSONResponse:
@@ -114,6 +124,9 @@ def verification_json_response(
         comparison=comparison,
         ocr_average_confidence=ocr_average_confidence,
         extracted_document_number_masked=extracted_document_number_masked,
+        extracted_document_number=extracted_document_number,
+        extracted_name=extracted_name,
+        extracted_address=extracted_address,
         extracted_text_lines=extracted_text_lines,
         processed_images=processed_images,
     )
@@ -355,6 +368,28 @@ def readable_ocr_lines(lines) -> list[str]:
         for line in lines
         if line.confidence >= 0.45
     ]
+
+
+def extract_label_value(lines, labels: tuple[str, ...], max_lines: int = 1) -> str | None:
+    stop_labels = (
+        "NAMA", "NAME", "ALAMAT", "ADDRESS", "WARGANEGARA", "CITIZENSHIP",
+        "JANTINA", "GENDER", "AGAMA", "RACE", "TARIKH LAHIR", "DATE OF BIRTH",
+    )
+    for index, line in enumerate(lines):
+        text = " ".join(str(line.text).split()).strip()
+        upper = text.upper()
+        for label in labels:
+            match = re.match(rf"^{re.escape(label)}\s*[:\-]?\s*(.*)$", upper, flags=re.IGNORECASE)
+            if match:
+                values = [match.group(1).strip()]
+                for following in lines[index + 1:index + 1 + max_lines]:
+                    candidate = " ".join(str(following.text).split()).strip()
+                    if not candidate or any(candidate.upper().startswith(stop) for stop in stop_labels):
+                        break
+                    values.append(candidate)
+                value = " ".join(part for part in values if part)
+                return value or None
+    return None
 
 
 @app.post(
@@ -1017,11 +1052,9 @@ async def verify_mykad_pdf(
 
     if result.status == "VERIFIED":
         result.status = "MANUAL_REVIEW"
-        result.verified = False
         result.message = (
-            "The identity details matched, but the required CIDB-use cross-out, "
-            "director signature, and company stamp have not been machine-checked. "
-            "An authorised reviewer must confirm the complete submission."
+            "The identity details and image quality matched. CIDB marking and "
+            "signature checks remain outside OCR."
         )
     else:
         result.message = (
@@ -1040,6 +1073,8 @@ async def verify_mykad_pdf(
 )
 async def verify_cancellation_form_pdf(
     document_pdf: UploadFile = File(...),
+    entered_name: str | None = Form(default=None),
+    entered_nric: str | None = Form(default=None),
 ):
     if document_pdf.content_type != "application/pdf":
         raise HTTPException(
@@ -1069,20 +1104,99 @@ async def verify_cancellation_form_pdf(
     form_image = decode_image(rendered_pages[0])
     form_quality = check_image_quality(form_image)
     form_ocr_lines = run_ocr(form_image)
-    extracted_nric = extract_nric(form_ocr_lines)
+    front_document, extracted_nric = evaluate_mykad_front(form_ocr_lines)
+    entered_name = entered_name.strip() if entered_name and entered_name.strip() else None
+    entered_nric = entered_nric.strip() if entered_nric and entered_nric.strip() else None
+    if entered_nric and not validate_nric_format(entered_nric):
+        raise HTTPException(status_code=400, detail="The entered NRIC is invalid.")
+    comparison = compare_mykad_details(
+        entered_name=entered_name or "",
+        entered_nric=entered_nric or extracted_nric or "",
+        extracted_nric=extracted_nric,
+        lines=form_ocr_lines,
+    )
+    extracted_name = extract_label_value(form_ocr_lines, ("NAMA", "NAME"))
+    if extracted_name is None and entered_name and comparison.name_match:
+        extracted_name = entered_name
+    extracted_address = extract_label_value(form_ocr_lines, ("ALAMAT", "ADDRESS"), max_lines=3)
+    identity_verified = bool(
+        form_quality.passed
+        and front_document.passed
+        and extracted_nric
+        and entered_name
+        and comparison.name_match
+        and (not entered_nric or comparison.document_number_match)
+    )
     return build_verification_response(
-        verified=False,
+        verified=identity_verified,
         status="MANUAL_REVIEW",
-        message=(
-            "OCR inspected the cancellation form. An authorised reviewer must "
-            "visually confirm the marked/crossed-out IC and signature; OCR "
-            "does not verify those marks or compare identity to a case record."
-        ),
+        message="Identity and image quality passed." if identity_verified else "The image or identity fields could not be confirmed automatically.",
         document_type="cancellation_form",
         images_quality={"cancellation_form": form_quality},
+        documents={"mykad_front": front_document},
+        comparison=comparison,
         ocr_average_confidence=round(
             average_ocr_confidence(form_ocr_lines),
             4,
         ),
         extracted_document_number_masked=mask_document_number(extracted_nric),
+        extracted_document_number=extracted_nric,
+        extracted_name=extracted_name,
+        extracted_address=extracted_address,
+        extracted_text_lines=readable_ocr_lines(form_ocr_lines) or None,
+    )
+
+
+@app.post(
+    "/api/verify-mykad-image",
+    response_model=VerificationResponse,
+    response_model_exclude_none=True,
+    dependencies=[Depends(require_ocr_api_key)],
+)
+async def verify_mykad_image(
+    image_file: UploadFile = File(...),
+    entered_name: str | None = Form(default=None),
+    entered_nric: str | None = Form(default=None),
+):
+    if image_file.content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Upload a supported MyKad image.")
+    _, image, quality = await read_and_validate_image(image_file)
+    lines = run_ocr(image)
+    document, extracted_nric = evaluate_mykad_front(lines)
+    entered_name = entered_name.strip() if entered_name and entered_name.strip() else None
+    entered_nric = entered_nric.strip() if entered_nric and entered_nric.strip() else None
+    if entered_nric and not validate_nric_format(entered_nric):
+        raise HTTPException(status_code=400, detail="The entered NRIC is invalid.")
+    comparison = compare_mykad_details(
+        entered_name=entered_name or "",
+        entered_nric=entered_nric or extracted_nric or "",
+        extracted_nric=extracted_nric,
+        lines=lines,
+    )
+    extracted_name = extract_label_value(lines, ("NAMA", "NAME"))
+    if extracted_name is None and entered_name and comparison.name_match:
+        extracted_name = entered_name
+    extracted_address = extract_label_value(lines, ("ALAMAT", "ADDRESS"), max_lines=3)
+    identity_verified = bool(
+        quality.passed
+        and document.passed
+        and extracted_nric
+        and entered_name
+        and comparison.name_match
+        and (not entered_nric or comparison.document_number_match)
+    )
+    return build_verification_response(
+        verified=identity_verified,
+        status="MANUAL_REVIEW",
+        message="Identity and image quality passed." if identity_verified else "The image or identity fields could not be confirmed automatically.",
+        document_type="mykad",
+        images_quality={"mykad_image": quality},
+        documents={"mykad_front": document},
+        comparison=comparison,
+        ocr_average_confidence=round(average_ocr_confidence(lines), 4),
+        extracted_document_number_masked=mask_document_number(extracted_nric),
+        extracted_document_number=extracted_nric,
+        extracted_name=extracted_name,
+        extracted_address=extracted_address,
+        extracted_text_lines=readable_ocr_lines(lines) or None,
     )

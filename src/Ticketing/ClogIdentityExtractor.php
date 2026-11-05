@@ -70,12 +70,12 @@ final class ClogIdentityExtractor
         $companyNo = $tableData['company no.'] ?? $tableData['company no'] ?? null;
 
         $categoryRaw = strtolower($tableData['customer category'] ?? $tableData['category'] ?? '');
-        if (str_contains($categoryRaw, 'individu') || str_contains(strtolower($subject), 'individu')) {
-            $customerType = 'individual';
-        } elseif (str_contains($categoryRaw, 'syarikat') || str_contains(strtolower($subject), 'syarikat') || str_contains($categoryRaw, 'company')) {
+        if (str_contains($categoryRaw, 'syarikat') || str_contains($categoryRaw, 'company') || trim((string)$companyName) !== '') {
             $customerType = 'company';
-        } else {
+        } elseif (str_contains($categoryRaw, 'individu')) {
             $customerType = 'individual';
+        } else {
+            $customerType = 'unknown';
         }
 
         $combinedText = strtolower($subject . ' ' . $text . ' ' . ($tableData['remarks'] ?? ''));

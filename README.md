@@ -13,7 +13,7 @@ Independent PHP 8.2 / PostgreSQL application. It does not load or depend on the 
 
 1. `cd cidb-pre-chatbot-portal`
 2. `composer install` (required before using the email module)
-3. Copy `.env.example` to `.env`, set database credentials, RPA endpoint and API key. Confirm the CRM and Email RPA field mappings with the RPA owner before production use.
+3. Copy `.env.example` to `.env` and configure PostgreSQL, CLOG MySQL, and RPA Hub MySQL credentials. Keep credentials out of tracked files.
 4. Create the database and run `psql -d cidb_portal -f database/schema.sql`.
 5. Create the first login: `php bin/create-user.php USERNAME EMAIL 'a-long-password-here'` (password must be at least 12 characters).
 6. Start: `php -S 127.0.0.1:8080 -t public public/index.php`
@@ -25,13 +25,13 @@ For a database used while CRM was removed, apply `psql -d cidb_portal -f databas
 
 ## Environment
 
-See `.env.example`: `APP_ENV`, `APP_URL`, `SESSION_SECURE_COOKIE`, `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `DB_TIMEOUT`, `CLOG_DB_HOST`, `CLOG_DB_DATABASE`, `CLOG_DB_USERNAME`, `CLOG_DB_PASSWORD`, `CLOG_DB_TIMEOUT`, `CLOG_TIMEZONE`, `CLOG_INITIAL_SYNC_DAYS`, `CLOG_FILE_FETCH_BASE_URL`, `RPA_BOT_ENDPOINT`, `RPA_BOT_API_KEY`, `RPA_BOT_TIMEOUT_MS`, `RPA_BOT_CONNECT_TIMEOUT_MS`, `RPA_COMPANY`, `RPA_SCENARIO_KEY`, and `RPA_CHANNEL`.
+See `.env.example` for portal, CLOG, OCR, and RPA Hub settings. `RPA_HUB_ENV_FILE` can point to the RPA Hub `.env`; otherwise use the `RPA_HUB_DB_*` settings. Do not commit `.env` files.
 
 The portal's own environment values are read from `.env`; no chatbot environment file is loaded.
 
-The optional MySQL CLOG to PostgreSQL sync runs with `php bin/cron_runner.php`. Configure its source credentials separately from the portal's PostgreSQL `DB_*` settings. The source-to-target mapping and tables used are documented in [the CLOG sync guide](docs/clog-sync.md).
+The CLOG to portal sync runs with `php bin/cron_runner.php`. Normal runs read only Open CLOG emails dated today in `CLOG_TIMEZONE` (Asia/Kuala_Lumpur by default). Use `--backlog` only for a scoped, explicitly requested historical reprocess. `--skip-rpa-dispatch` can be combined with a scoped `--crm-id` to repair portal records without creating Hub scheduler rows. The source mapping is documented in [the CLOG sync guide](docs/clog-sync.md).
 
-`RPA_COMPANY`, `RPA_SCENARIO_KEY`, and the RPA endpoint configure the existing form-submission path. Email cancellation intake no longer dispatches cancellation execution RPA from Cron1; see [the ticket workflow foundation](docs/ticket-workflow.md).
+The cancellation workflow inserts directly into the RPA Hub MySQL database; it does not use the RPA API. Bot_Input uses the exact nine fields documented in [the ticket workflow guide](docs/ticket-workflow.md). Email Cancel insertion requires ready customer attachments and verified OCR identity.
 
 ## RPA result polling
 
@@ -45,10 +45,10 @@ Run the regression checks with `php tests/request-result.php` and `node tests/po
 
 ## Cancellation intake and ticket workflow
 
-The optional CLOG sync runs with `php bin/cron_runner.php`; the email cancellation intake runs with `php bin/email-reader.php`. Both create durable ticket records rather than executing a cancellation in Cron1. The email worker stages missing-information RPA intents for later contract review, and no customer/RPA messages are sent. `bin/ocr_runner.php` is an opt-in OCR-only Cron2 worker; it processes assigned, Open tickets marked `ready_for_ocr` and always leaves the result for manual review. It does not send email or call RPA.
+Cron1 runs with `php bin/cron_runner.php`; Cron2 runs with `php bin/cron_runner.php --cron2`. Cron1 defaults to today-only, Open, Individual ID-cancellation intake. Companies and agent `ReplyTo Mail` messages are excluded. When no customer attachment exists, Cron1 can send the `Pending Customer Attachment` request through direct Hub insertion. Cron2 checks same-day customer attachments (including Closed customer reply rows), runs OCR automatically when enabled, and sends `Email Cancel` directly to Hub only when identity is verified and a ready customer document exists. Agent reply attachments are retained as thread history but are not OCR inputs.
 
-For existing databases, apply `20260925_email_reader.sql` first if it has not already been applied, then `20261020_ticket_workflow.sql`, `20261021_ticket_attachment_lookup.sql`, `20261022_clog_open_status.sql`, `20261023_ticket_conversation_foundation.sql`, and `20261027_ocr_manual_review.sql` in order. These migrations are not run automatically. Fresh `database/schema.sql` includes them. Configure `OCR_SERVICE_URL` and `OCR_API_KEY`, verify the service, and only then set `OCR_ENABLED=true`. Read [the ticket workflow guide](docs/ticket-workflow.md), [the CLOG sync guide](docs/clog-sync.md), and [the email intake guide](docs/email-reader.md) before enabling either cron.
+For existing databases, apply the migrations in order through `20261027_ocr_manual_review.sql`, then apply `20261105_cleanup_ocr_ticket_statuses.sql`. These migrations are not run automatically. Fresh `database/schema.sql` includes them. Configure and verify the private OCR service and API key before setting `OCR_ENABLED=true`. Read [the ticket workflow guide](docs/ticket-workflow.md) and [the CLOG sync guide](docs/clog-sync.md) before scheduling the workers.
 
-The ticket foundation provides required scenario tracking, scenario-specific buckets, PIC references, separate workflow status, source/customer metadata, document/OCR result storage, and a staged RPA action queue. The OCR worker expects a mapped customer name and NRIC and supports one two-page PDF or clearly named front/back image pair. It does not yet check CIDB-use cross-outs, company stamps, or signatures, and does not provide ticket-management UI or role-enforced assignment APIs. RPA action payloads and final cancellation execution remain pending.
+The OCR worker extracts name, NRIC, and address where readable, and rejects blurred images. Document OCR state is stored in `portal_ticket_documents.ocr_status`; OCR does not create extra ticket workflow statuses. A verified identity can proceed automatically to RPA. The pipeline does not validate CIDB cross-outs, signatures, or company stamps. Ticket-management UI and role-enforced assignment APIs remain separate work.
 
 For the controlled Cron2/OCR procedure and expected database results, see the [OCR internal test checklist](docs/ocr-internal-test.md).

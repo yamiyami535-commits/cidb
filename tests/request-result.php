@@ -20,8 +20,8 @@ $requestPayload=$client->workflowPayload([
 check($requestPayload['fields']===[
     'sCRMID'=>'TEST-CRM','sEmail'=>'test@example.test','sCustomerName'=>'Test','sLanguage'=>'en',
     'sChannel'=>'Email','sState'=>'Sarawak','sContactNumber'=>'0123456789',
-    'sFilename'=>'front.png,back.png','sRequst'=>'Pending Customer Attachment',
-],'Request-information payload includes the agreed request and customer context');
+    'sFilename'=>'front.png,back.png','sRequest'=>'Pending Customer Attachment',
+],'Request-information payload uses the agreed sRequest field and customer context');
 $cancelPayload=$client->workflowPayload([
     'action_type'=>'execute_cancellation','crm'=>'TEST-CRM','email'=>'test@example.test',
     'name'=>'Test','customer_type'=>'individual','id_number'=>'TEST001','language'=>'ms',
@@ -37,7 +37,7 @@ check(
     $client->workflowPayload([
         'action_type'=>'request_information','crm'=>'TEST-CRM','email'=>'test@example.test',
         'name'=>'Test','language'=>'en',
-    ])['fields']['sRequst']==='Pending Customer Attachment',
+    ])['fields']['sRequest']==='Pending Customer Attachment',
     'Request-information does not assume an unverified customer type'
 );
 try {
