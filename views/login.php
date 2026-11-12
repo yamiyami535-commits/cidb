@@ -1,21 +1,8 @@
-<?php
-declare(strict_types=1);
-$pageTitle = 'Sign in';
-require __DIR__ . '/_layout-top.php';
-$flash ??= null;
-?>
-<section class="login-shell">
-    <div class="login-copy"><span class="eyebrow">CIDB SERVICE</span><h1>Secure request<br><em>management.</em></h1><p>Sign in to submit and track cancellation requests.</p></div>
-    <form class="login-panel" method="post" action="/login">
-        <span class="panel-kicker">WELCOME BACK</span><h2>Sign in</h2>
-        <?php if (isset($error) && $error !== null): ?><div class="notice error visible"><?= e($error) ?></div><?php endif; ?>
-        <?php if ($flash): ?><div class="notice <?= e($flash['kind'] ?? '') ?> visible"><?= e($flash['message'] ?? '') ?></div><?php endif; ?>
-        <input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>">
-        <div class="form-stack">
-            <label>Username or email<input name="username" autocomplete="username" required></label>
-            <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-            <button class="primary" type="submit">Sign in <span aria-hidden="true">→</span></button>
-        </div>
-    </form>
-</section>
-<?php require __DIR__ . '/_layout-bottom.php'; ?>
+<?php ob_start(); ?>
+<section class="login-shell"><div class="login-copy"><div class="eyebrow"><span class="eyebrow-line"></span>CONTRACTOR SERVICES</div><h1>Progress starts<br>with the right <em>connection.</em></h1><p>Sign in to securely submit your information and start a CIDB service request.</p><div class="login-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="art-core">C<span>+</span></div><div class="art-dot dot-one"></div><div class="art-dot dot-two"></div></div><div class="login-note"><span class="shield">✓</span> Protected access for your service requests</div></div>
+<div class="login-panel"><div class="panel-kicker">WELCOME BACK</div><h2>Sign in to your portal</h2><p class="muted">Use the account details provided to you.</p>
+<?php if (!empty($flash)): ?><div class="notice <?= e($flash['kind']) ?>" role="status"><?= e($flash['message']) ?></div><?php endif; ?>
+<?php if ($error): ?><div class="notice error" role="alert"><?= e($error) ?></div><?php endif; ?>
+<form method="post" action="/login" class="form-stack"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><label>Username or email<input name="username" type="text" autocomplete="username" placeholder="Enter your username or email" required autofocus></label><label>Password<input name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></label><button class="primary" type="submit">Sign in <span aria-hidden="true">→</span></button></form>
+<div class="privacy-note"><span>◈</span> Your information is handled securely.</div><div class="panel-partner">Delivered with <img class="daythree-logo daythree-logo-panel" src="/assets/images/daythree-logo-1.png" alt="Daythree"></div></div></section>
+<?php $content=ob_get_clean(); $title='Sign in · CIDB Digital Services'; require __DIR__.'/layout.php'; ?>

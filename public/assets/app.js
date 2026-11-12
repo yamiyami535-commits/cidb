@@ -1,4 +1,10 @@
 document.addEventListener('DOMContentLoaded',()=>{
+  document.querySelectorAll('[data-sidebar-toggle]').forEach(button=>button.addEventListener('click',()=>{
+    const workspace=button.closest('.portal-workspace');
+    const collapsed=workspace.classList.toggle('is-collapsed');
+    button.setAttribute('aria-expanded',String(!collapsed));
+    button.querySelector('.sidebar-toggle-label').textContent=collapsed?'Show menu':'Hide menu';
+  }));
   document.querySelectorAll('[data-submit-form]').forEach(form=>{
     const inputs=[...form.querySelectorAll('input[required]:not([type=hidden])')];
     inputs.forEach(input=>input.addEventListener('blur',()=>validate(input)));

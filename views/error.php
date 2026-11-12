@@ -1,7 +1,1 @@
-<?php
-declare(strict_types=1);
-$pageTitle = 'Temporarily unavailable';
-require __DIR__ . '/_layout-top.php';
-?>
-<section class="form-card"><span class="panel-kicker">PLEASE TRY AGAIN</span><h1>We could not load this page.</h1><p class="muted">The service encountered a problem. Your information has not been displayed.</p><a class="primary" href="/">Return to the portal</a></section>
-<?php require __DIR__ . '/_layout-bottom.php'; ?>
+<?php ob_start(); ?><section class="error-page"><div class="error-symbol">!</div><div class="eyebrow"><span class="eyebrow-line"></span>SERVICE TEMPORARILY UNAVAILABLE</div><h1>We’re unable to load<br><em>your portal right now.</em></h1><p>Please try again in a moment. Your information has not been displayed.</p><a class="primary link-button" href="/">Try again <span>→</span></a></section><?php $content=ob_get_clean(); $title='Service unavailable · CIDB'; require __DIR__.'/layout.php'; ?>

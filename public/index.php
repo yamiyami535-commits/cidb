@@ -3,6 +3,7 @@ declare(strict_types=1);
 if (PHP_SAPI === 'cli-server') { $static = realpath(__DIR__ . parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH)); if ($static && str_starts_with($static, __DIR__ . DIRECTORY_SEPARATOR) && is_file($static)) return false; }
 require dirname(__DIR__) . '/src/bootstrap.php';
 require dirname(__DIR__) . '/src/RpaClient.php';
+require dirname(__DIR__) . '/src/OcrVerificationClient.php';
 require dirname(__DIR__) . '/src/RpaSubmission.php';
 require dirname(__DIR__) . '/src/request-result.php';
 require dirname(__DIR__) . '/src/RequestHistory.php';
@@ -15,6 +16,41 @@ header('X-Content-Type-Options: nosniff'); header('X-Frame-Options: DENY'); head
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/'; $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
 try {
+    if ($path === '/api/ocr/verify-document' && $method === 'POST') {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        header('X-Content-Type-Options: nosniff');
+        $expectedKey = env_value('OCR_RPA_API_KEY');
+        $providedKey = (string)($_SERVER['HTTP_X_API_KEY'] ?? '');
+        if ($expectedKey === '') {
+            http_response_code(503);
+            echo json_encode(['verified'=>false,'status'=>'OCR_API_UNAVAILABLE','message'=>'OCR verification is not configured.']);
+            exit;
+        }
+        if ($providedKey === '' || !hash_equals($expectedKey, $providedKey)) {
+            http_response_code(401);
+            echo json_encode(['verified'=>false,'status'=>'UNAUTHORIZED','message'=>'A valid API key is required.']);
+            exit;
+        }
+        session_write_close();
+        $contentType = strtolower((string)($_SERVER['CONTENT_TYPE'] ?? ''));
+        if (!str_starts_with($contentType, 'multipart/form-data')) {
+            http_response_code(400);
+            echo json_encode(['verified'=>false,'status'=>'INVALID_REQUEST','message'=>'Send the verification fields and images as multipart/form-data.']);
+            exit;
+        }
+        $contentLength = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
+        $maxRequestBytes = max(1, (int)env_value('OCR_MAX_REQUEST_SIZE_MB', '17')) * 1024 * 1024;
+        if ($contentLength > $maxRequestBytes) {
+            http_response_code(413);
+            echo json_encode(['verified'=>false,'status'=>'INVALID_REQUEST','message'=>'The verification upload exceeds the configured request size limit.']);
+            exit;
+        }
+        $result = (new OcrVerificationClient())->verify($_POST, $_FILES);
+        http_response_code($result['http_status']);
+        echo json_encode($result['body'], JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE);
+        exit;
+    }
     if ($path === '/logout' && $method === 'POST') { if (!csrf_valid()) { http_response_code(419); exit('Session expired.'); } $_SESSION=[]; session_regenerate_id(true); flash('success','You have been signed out.'); redirect('/login'); }
     if ($path === '/login') {
         if (current_user()) redirect('/');
@@ -49,6 +85,9 @@ try {
         exit;
     }
     require_login();
+    if ($path === '/tickets' || str_starts_with($path, '/tickets/')) {
+        require dirname(__DIR__) . '/src/ticket-routes.php'; exit;
+    }
     if ($path === '/request-history' && $method === 'GET') {
         $source=is_string($_GET['source']??null) && in_array($_GET['source'],['all','form','email'],true) ? $_GET['source'] : 'all';
         $page=is_string($_GET['page']??null) ? filter_var($_GET['page'],FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]) : false;
@@ -89,5 +128,14 @@ try {
     if ($path !== '/' && $path !== '/index.php') { http_response_code(404); render('not-found'); exit; }
     $requests=(new RequestHistory(db()))->list(current_user()['id'],'all',5);
     $errors=$_SESSION['form_errors']??[]; $values=$_SESSION['form_values']??[]; unset($_SESSION['form_errors'],$_SESSION['form_values']);
-    render('home',['flash'=>take_flash(),'requests'=>$requests,'errors'=>$errors,'values'=>$values]);
+    // Queue availability must never prevent customer submission or recent activity.
+    require_once dirname(__DIR__) . '/src/tickets.php';
+    $ticketNavigation=[];
+    try {
+        $ticketSchemaReady=db()->query("SELECT to_regclass('portal_tickets') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('portal_users') AND attname='role' AND NOT attisdropped)")->fetchColumn();
+        if ($ticketSchemaReady) $ticketNavigation=(new TicketRepository(db(),current_user()))->counts(ticket_filters([]));
+    }
+    catch (TicketAccessDenied) { /* No operational data for non-staff accounts. */ }
+    catch (Throwable $e) { error_log('Ticket navigation unavailable: '.$e->getMessage()); }
+    render('home',['flash'=>take_flash(),'requests'=>$requests,'errors'=>$errors,'values'=>$values,'ticketNavigation'=>$ticketNavigation]);
 } catch (Throwable $e) { error_log('Portal application error: '.$e->getMessage()); http_response_code(500); render('error'); }

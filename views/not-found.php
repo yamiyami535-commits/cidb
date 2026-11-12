@@ -1,7 +1,28 @@
 <?php
-declare(strict_types=1);
-$pageTitle = 'Page not found';
-require __DIR__ . '/_layout-top.php';
+ob_start();
 ?>
-<section class="form-card"><span class="panel-kicker">404</span><h1>Page not found</h1><p class="muted">The page may have moved or is not available.</p><a class="primary" href="/">Return to the portal</a></section>
-<?php require __DIR__ . '/_layout-bottom.php'; ?>
+
+<section class="error-page">
+    <div class="error-symbol">404</div>
+
+    <h1>Oops! This page took a wrong turn. 😅</h1>
+
+    <p>
+        Looks like the page you're looking for has gone missing.
+        We've checked everywhere... even the usual hiding spots.
+    </p>
+
+    <a class="primary link-button" href="/">
+        Take me back to the portal <span>→</span>
+    </a>
+
+    <p class="error-hint">
+        Don't worry, nothing is broken. You just found a page that doesn't exist. 👀
+    </p>
+</section>
+
+<?php
+$content = ob_get_clean();
+$title = '404 · CIDB';
+require __DIR__ . '/layout.php';
+?>
