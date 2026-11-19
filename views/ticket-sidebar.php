@@ -1,14 +1,14 @@
 <?php
+require_once dirname(__DIR__).'/src/tickets.php';
 $ticketNavigation ??= [];
 $ticketPages = [
-    'service' => ['label'=>'CIDB SERVICE REQUEST','href'=>'/','tone'=>'service','count'=>null],
-    'management' => ['label'=>'TICKET MANAGEMENT','href'=>'/tickets','tone'=>'service','count'=>$ticketNavigation ? array_sum($ticketNavigation)-($ticketNavigation['closed']??0) : '—'],
-    'needs_information' => ['label'=>'NEEDS INFORMATION','href'=>'/tickets?status=needs_information','tone'=>'responded','count'=>$ticketNavigation['needs_information']??'—'],
-    'ready_for_ocr' => ['label'=>'READY FOR OCR','href'=>'/tickets?status=ready_for_ocr','tone'=>'waiting','count'=>$ticketNavigation['ready_for_ocr']??'—'],
-    'ready_for_execution' => ['label'=>'READY FOR EXECUTION','href'=>'/tickets?status=ready_for_execution','tone'=>'acknowledgement','count'=>$ticketNavigation['ready_for_execution']??'—'],
-    'completed' => ['label'=>'COMPLETED','href'=>'/tickets?status=completed','tone'=>'resolved','count'=>$ticketNavigation['completed']??'—'],
-    'closed' => ['label'=>'CLOSED','href'=>'/tickets?status=closed','tone'=>'closed','count'=>$ticketNavigation['closed']??'—'],
+    'management' => ['label'=>'All active tickets','href'=>'/tickets','tone'=>'service','count'=>$ticketNavigation ? array_sum($ticketNavigation)-($ticketNavigation['closed']??0) : '—'],
 ];
+foreach (TICKET_STATUSES as $status=>$label) {
+    $ticketPages[$status] = ['label'=>$label,'href'=>'/tickets?status='.$status,'tone'=>match($status) {
+        'needs_information','failed'=>'responded', 'completed'=>'resolved', 'closed'=>'closed', default=>'service',
+    },'count'=>$ticketNavigation[$status]??'—'];
+}
 ?>
 <aside class="ticket-sidebar" id="ticket-sidebar" aria-label="Ticket status navigation">
   <div class="sidebar-heading"><span class="panel-kicker">TICKET QUEUE</span><span class="sidebar-caption">Workflow views</span></div>
@@ -19,5 +19,4 @@ $ticketPages = [
       </a>
     <?php endforeach; ?>
   </nav>
-  <div class="sidebar-footnote">Open <a href="/tickets">Ticket management</a> for all workflow queues.<?= !$ticketNavigation ? ' Counts are currently unavailable.' : '' ?></div>
 </aside>

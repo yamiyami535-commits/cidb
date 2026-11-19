@@ -29,13 +29,25 @@ The workspace is read-only. There are no assignment/status mutations, file-fetch
 - Documents and RPA actions come from the detail view. OCR jobs are queried separately through `portal_ticket_documents` because the job ledger is not embedded in that view.
 - Ticket workflow, CLOG status, CRM interaction status, reference status, OCR status/job state, RPA action state, and mailbox intake stage are separately labeled. A ready reference is not a successful download or OCR result.
 - Times are shown in `Asia/Kuala_Lumpur`. Unparseable CLOG source timestamps remain escaped source text. Nulls/empty collections have explicit empty states.
-- Identity fields show only their last four characters (short IDs are fully masked). The same masking covers identity fields in structured diagnostics and known ticket/CRM IDs in text, with an additional NRIC-pattern pass. No identity reveal control is provided. This is a conservative default because the existing project has no reusable privacy policy/helper.
-- Message HTML is converted to text, then escaped like all other source content. It is never inserted as HTML. File URLs, storage keys, raw mailbox bodies and credential fields are withheld from diagnostics.
+- Identity fields initially show only their last four characters (short IDs are fully masked). CRM and requester facts have eye toggles that fetch the full ID only on demand through `/tickets/crm/identity?crm_id=...` or `/tickets/{uuid}/identity`. These GET endpoints use the same active-staff authorization and no-store response policy as the workspace. Full IDs are absent from initial HTML, and toggles remask on navigation or when the browser tab is hidden. Diagnostic identity masking remains intact.
+- Email rendering rebuilds a small allowlist of paragraphs, lists, emphasis, tables and safe links, supporting HTML in either `body_html` or `body_text`. Source styles, scripts, attributes, remote images and active content are excluded. Plain text keeps its line breaks. File URLs, storage keys, raw mailbox bodies and credential fields remain withheld from diagnostics.
+
+## Compact portal UI (November 2026)
+
+`portal-ui.css` supplies the shared fixed left navigation, compact single-row filter bar, responsive layouts and email presentation. Narrow screens collapse the sidebar initially and allow horizontal scrolling within filters/tables. Service request navigation is in the top bar; request history remains accessible from the landing page's history card. The landing and queue collapse controls occupy a reserved left gutter and a separate row above their main content cards. The controls stick below the header while scrolling, and the gutter remains available in both sidebar states. The queue's CRM search box submits the existing `crm_id` GET parameter to `/tickets/crm`. The removed technical fields remain in the read models; UUIDs still identify ticket routes and relationships.
+
+CRM and Ticket Details display the latest available email. CRM loads one message from existing conversation tables; ticket details use the existing thread collection. Known sent timestamps take precedence over unknown times, with creation order breaking ties. CRM thread summaries show **SLA due (3 days)**, calculated from `cidb_email_threads.created_at` plus three calendar days and displayed in Malaysia time. This is a fixed due date, not a live countdown or a business-day calculation; it does not update workflow state or write to the database.
+
+The Documents section shows filenames, reference/OCR badges, CRM ID, Created and Updated consistently for every record. This checkout has no document retrieval/viewer endpoint; this UI update does not add one. Existing OCR job and RPA action diagnostics remain available in their tabs. No database migration is needed.
+
+Email presentation interprets literal escaped CR/LF sequences as line breaks in plain text and HTML text nodes across CRM, Latest Email and Conversation. It does not rewrite stored messages or broadly unescape quotes and other content. OCR request/response payload sections are omitted from the Documents & OCR template; the stored payloads and processing remain unchanged.
 
 ## Verification
 
 ```text
 php tests/tickets.php
+php tests/ui-fixtures.php
+node tests/ui-browser.cjs
 php tests/tickets.php --live
 php tests/tickets-http.php --live
 php tests/request-result.php
@@ -46,6 +58,8 @@ node tests/portal-http.cjs
 node tests/workspace-browser.cjs --live
 node --check public/assets/tickets.js
 ```
+
+`ui-fixtures.php` checks all six views using synthetic records, plus email sanitization, privacy and SLA date calculations. `ui-browser.cjs` serves those fixtures locally and runs headless Chrome at desktop, tablet and mobile widths. It checks overflow, fixed navigation, collapse/expand, ID toggles (using a mock endpoint), filter height and CRM alignment. Screenshots remain in ignored `var/ui-browser-*` directories. These checks require no database or production credentials; use `CHROME_BINARY` to override Chrome's path.
 
 `--live` uses the configured PostgreSQL database inside a read-only, repeatable-read transaction and rolls it back. It checks real views/joins, status and source filters, count consistency, stable pagination, chronological conversations, representative detail tabs, exact CRM matching and access rejection. It does not mutate users/tickets or invoke integrations. `--preview` writes a synthetic HTML preview to ignored `var/ticket-ui-preview.html` for visual inspection.
 

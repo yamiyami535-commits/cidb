@@ -10,9 +10,10 @@
   <link rel="stylesheet" href="/assets/email.css">
   <?php if (($mainClass ?? '') === 'portal-main'): ?><link rel="stylesheet" href="/assets/portal-shell.css"><?php endif; ?>
   <?php if (!empty($ticketWorkspace)): ?><link rel="stylesheet" href="/assets/tickets.css"><?php endif; ?>
+  <link rel="stylesheet" href="/assets/portal-ui.css">
 </head>
-<body<?= !empty($ticketWorkspace) ? ' class="ticket-workspace"' : '' ?>>
-<header class="topbar"><a class="brand" href="/" aria-label="CIDB Malaysia Digital Services home"><img class="cidb-logo" src="/assets/images/CIDB-Logo.png" alt="CIDB Malaysia"></a><div class="partner"><img class="daythree-logo daythree-logo-header" src="/assets/images/daythree-logo-1.png" alt="Daythree"></div>
+<body class="<?= !empty($ticketWorkspace) ? 'ticket-workspace has-ticket-sidebar' : (($mainClass ?? '') === 'portal-main' ? 'has-ticket-sidebar' : '') ?>">
+<header class="topbar"><a class="brand" href="/" aria-label="CIDB Malaysia Digital Services home"><img class="cidb-logo" src="/assets/images/CIDB-Logo.png" alt="CIDB Malaysia"></a><?php if (current_user()): ?><nav class="top-navigation" aria-label="Main navigation"><a href="/"<?= ($activeTicketPage ?? '') === 'service' ? ' aria-current="page"' : '' ?>>CIDB Service Request</a></nav><?php endif; ?><div class="partner"><img class="daythree-logo daythree-logo-header" src="/assets/images/daythree-logo-1.png" alt="Daythree"></div>
 <?php if (current_user()): ?><div class="account"><span><?= e(current_user()['username']) ?></span><form method="post" action="/logout"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><button class="signout" type="submit">Sign out</button></form></div><?php endif; ?>
 </header>
 <main class="<?= e($mainClass ?? '') ?>"><?= $content ?? '' ?></main>

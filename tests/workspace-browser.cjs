@@ -59,7 +59,7 @@ class DevTools {
     assert.deepEqual(await cdp.evaluate(`[...document.querySelectorAll('[data-submit-form] input[required]')].map(e=>e.name)`),['name','id_number','email','crm']);
     assert.ok(await cdp.evaluate(`document.querySelector('#ticket-sidebar a[href="/tickets"]').getBoundingClientRect().width > 0`),'Ticket management entry is visible');
     assert.ok(await cdp.evaluate(`document.querySelector('main').classList.contains('portal-main') && !document.body.classList.contains('ticket-workspace')`));
-    const homeWidth=await cdp.evaluate(`document.querySelector('#ticket-sidebar').getBoundingClientRect().width`);assert.equal(Math.round(homeWidth),262);
+    const homeWidth=await cdp.evaluate(`document.querySelector('#ticket-sidebar').getBoundingClientRect().width`);assert.equal(Math.round(homeWidth),230);
     await screenshot('home'); await noOverflow();
     await cdp.evaluate(`document.querySelector('[data-sidebar-toggle]').click()`);assert.ok(await cdp.evaluate(`document.querySelector('.portal-workspace').classList.contains('is-collapsed')`));
     await cdp.evaluate(`document.querySelector('[data-sidebar-toggle]').click()`);
