@@ -1,10 +1,17 @@
 document.addEventListener('DOMContentLoaded',()=>{
-  document.querySelectorAll('[data-sidebar-toggle]').forEach(button=>button.addEventListener('click',()=>{
+  document.querySelectorAll('[data-sidebar-toggle]').forEach(button=>{
     const workspace=button.closest('.portal-workspace');
-    const collapsed=workspace.classList.toggle('is-collapsed');
-    button.setAttribute('aria-expanded',String(!collapsed));
-    button.querySelector('.sidebar-toggle-label').textContent=collapsed?'Show menu':'Hide menu';
-  }));
+    const setCollapsed=collapsed=>{
+      workspace.classList.toggle('is-collapsed',collapsed);
+      button.setAttribute('aria-expanded',String(!collapsed));
+      button.setAttribute('aria-label',collapsed?'Expand ticket menu':'Collapse ticket menu');
+      button.title=button.getAttribute('aria-label');
+      button.querySelector('span').textContent=collapsed?'›':'‹';
+    };
+    setCollapsed(window.matchMedia('(max-width: 760px)').matches);
+    button.addEventListener('click',()=>setCollapsed(!workspace.classList.contains('is-collapsed')));
+    workspace.addEventListener('keydown',event=>{if(event.key==='Escape'){setCollapsed(true);button.focus();}});
+  });
   document.querySelectorAll('[data-submit-form]').forEach(form=>{
     const inputs=[...form.querySelectorAll('input[required]:not([type=hidden])')];
     inputs.forEach(input=>input.addEventListener('blur',()=>validate(input)));

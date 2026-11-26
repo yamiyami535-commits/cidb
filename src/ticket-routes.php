@@ -12,6 +12,16 @@ try {
         $workspace['message']='This ticket workspace supports viewing records only.';
     } else {
         $repository = new TicketRepository(db(), current_user());
+        if ($path === '/tickets/crm/identity' || preg_match('#^/tickets/([a-f0-9-]{36})/identity$#i', $path, $identityMatch)) {
+            $kind = $path === '/tickets/crm/identity' ? 'crm' : 'ticket';
+            $reference = $kind === 'crm' ? ticket_input($_GET, 'crm_id') : $identityMatch[1];
+            if (($kind === 'ticket' && !ticket_uuid($reference)) || $reference === '' || mb_strlen($reference) > 120) throw new InvalidArgumentException('Invalid identity reference.');
+            $identity = $repository->identity($kind, $reference);
+            header('Content-Type: application/json; charset=utf-8');
+            if ($identity === null || $identity === '') http_response_code(404);
+            echo json_encode(['identity'=>$identity], JSON_THROW_ON_ERROR);
+            return;
+        }
         // Retain bookmarks from the original preview without inventing workflow states.
         $legacyQueues = [
             '/tickets/customer-responded'=>'customer-responded',
