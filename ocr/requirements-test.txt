@@ -1,0 +1,12 @@
+# Production OCR/Paddle is intentionally not required for isolated unit tests.
+fastapi==0.116.1
+python-multipart==0.0.20
+opencv-python==4.12.0.88
+numpy==2.2.6
+rapidfuzz==3.14.1
+pydantic-settings==2.10.1
+pypdfium2==5.14.0
+Pillow==11.3.0
+onnxruntime==1.23.2
+onnx==1.20.0
+httpx==0.28.1

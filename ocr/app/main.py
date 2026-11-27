@@ -22,6 +22,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.datastructures import Headers
 
 from .config import settings
+from . import diagnostics
+from .document_validation import apply_document_validation, mandatory_document_failures
+from .visual_validation import visual_service
 from .image_quality import (
     check_image_quality,
     decode_image,
@@ -33,12 +36,9 @@ from .models import (
 )
 from .pdf_input import PdfInputError, render_pdf_pages
 from .ocr_service import ocr_service
-from .text_utils import validate_nric_format
 from .verifier import (
     average_ocr_confidence,
-    compare_mykad_details,
-    compare_passport_details,
-    extract_nric,
+    extract_document_name,
     evaluate_mykad_back,
     evaluate_mykad_front,
     evaluate_passport,
@@ -78,7 +78,7 @@ def build_verification_response(
     extracted_text_lines: list[str] | None = None,
     processed_images: list[ProcessedImage] | None = None,
 ) -> VerificationResponse:
-    return VerificationResponse(
+    return diagnostics.attach(VerificationResponse(
         verified=verified,
         status=status,
         message=message,
@@ -93,7 +93,7 @@ def build_verification_response(
         extracted_address=extracted_address,
         extracted_text_lines=extracted_text_lines,
         processed_images=processed_images,
-    )
+    ))
 
 
 def verification_json_response(
@@ -183,6 +183,7 @@ def invalid_request_response(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ = ocr_service
+    visual_service.initialize()
     yield
 
 
@@ -200,6 +201,20 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def diagnostic_observations(request: Request, call_next):
+    # API-key authentication remains enforced by the existing endpoint dependencies.
+    enabled = request.headers.get("x-ocr-diagnostics") == "1"
+    token = diagnostics.current.set(diagnostics.Diagnostics() if enabled else None)
+    try:
+        response = await call_next(request)
+        if enabled:
+            response.headers["Cache-Control"] = "no-store"
+        return response
+    finally:
+        diagnostics.current.reset(token)
 
 
 @app.exception_handler(HTTPException)
@@ -327,6 +342,8 @@ async def read_and_validate_image(
             detail=str(error),
         ) from error
 
+    if diagnostics.current.get() is not None:
+        diagnostics.current.get().image(decoded_image)
     quality = check_image_quality(
         decoded_image
     )
@@ -339,14 +356,19 @@ async def read_and_validate_image(
 
 
 def run_ocr(decoded_image):
+    if diagnostics.current.get() is not None:
+        diagnostics.current.get().image(decoded_image)
     processed_image = preprocess_for_ocr(
         decoded_image
     )
 
     try:
-        return ocr_service.recognize(
+        lines = ocr_service.recognize(
             processed_image
         )
+        if diagnostics.current.get() is not None:
+            diagnostics.current.get().text(lines, decoded_image)
+        return lines
 
     except Exception as error:
         print("\n========== OCR ERROR ==========")
@@ -392,6 +414,57 @@ def extract_label_value(lines, labels: tuple[str, ...], max_lines: int = 1) -> s
     return None
 
 
+def extraction_result(
+    *, images, lines, document_type, images_quality, extracted_name,
+    extracted_number, documents=None, processed_images=None,
+    extracted_address=None, success_status="MANUAL_REVIEW",
+    failure_status=None, failure_message=None, require_confidence=False,
+    include_text=True,
+):
+    """Return document-derived identity through the existing response payload.
+
+    Customer-supplied values and comparison scores do not participate. The
+    existing visual gate and status/storage contract are reused unchanged.
+    """
+    observer = diagnostics.current.get()
+    if observer is not None:
+        for image in images:
+            observer.image(image)
+        if not observer.ocr_ran:
+            observer.text(lines)
+    confidence = average_ocr_confidence(lines)
+    if observer is not None:
+        observer.additional_checks["ocr_confidence"] = {
+            "state": ("passed" if confidence >= settings.min_ocr_confidence else "failed") if require_confidence else "informational",
+            "reason": f"Average OCR confidence: {confidence:.3f}. " + (f"Required minimum: {settings.min_ocr_confidence:.3f}." if require_confidence else "This route does not apply an average-confidence gate."),
+        }
+    missing = mandatory_document_failures(
+        cross_out_present=True, customer_signature_present=True,
+        extracted_name=extracted_name, extracted_document_number=extracted_number,
+    )
+    if failure_status is None and missing:
+        failure_status, failure_message = "INVALID_DOCUMENT", " ".join(missing)
+    if failure_status is None and require_confidence and confidence < settings.min_ocr_confidence:
+        failure_status = "MANUAL_REVIEW"
+        failure_message = "The identity text was extracted, but OCR confidence requires manual review."
+    response = build_verification_response(
+        verified=failure_status is None,
+        status=failure_status or success_status,
+        message=failure_message or "Identity details were extracted from the submitted document.",
+        document_type=document_type, images_quality=images_quality,
+        documents=documents, ocr_average_confidence=round(confidence, 4),
+        extracted_document_number_masked=mask_document_number(extracted_number),
+        extracted_document_number=extracted_number, extracted_name=extracted_name,
+        extracted_address=extracted_address,
+        extracted_text_lines=(readable_ocr_lines(lines) or None) if include_text else None,
+        processed_images=processed_images,
+    )
+    return apply_document_validation(
+        response, images=images, extracted_name=extracted_name,
+        extracted_document_number=extracted_number, service=visual_service,
+    )
+
+
 @app.post(
     "/api/verify-document",
     response_model=VerificationResponse,
@@ -433,37 +506,13 @@ async def verify_document(
             detail="document_type is required.",
         )
 
-    if not entered_name or not entered_name.strip():
-        raise HTTPException(
-            status_code=422,
-            detail="entered_name is required.",
-        )
-
-    entered_name = entered_name.strip()
+    # Legacy entered_* form fields remain accepted but are not used.
 
     normalized_document_type = (
         document_type.strip().lower()
     )
 
     if normalized_document_type == "mykad":
-        if not entered_nric or not entered_nric.strip():
-            raise HTTPException(
-                status_code=422,
-                detail="NRIC number is required.",
-            )
-
-        entered_nric = entered_nric.strip()
-
-        if not validate_nric_format(entered_nric):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "The entered NRIC is invalid. "
-                    "Use a value such as "
-                    "900101-10-1234."
-                ),
-            )
-
         if not mykad_front or not mykad_back:
             raise HTTPException(
                 status_code=422,
@@ -564,202 +613,29 @@ async def verify_document(
                 processed_images=processed_images,
             )
 
-        front_document, extracted_nric = (
-            evaluate_mykad_front(
-                front_ocr_lines
-            )
-        )
-
-        back_document = evaluate_mykad_back(
-            back_ocr_lines
-        )
-
-        comparison = compare_mykad_details(
-            entered_name=entered_name,
-            entered_nric=entered_nric,
-            extracted_nric=extracted_nric,
-            lines=front_ocr_lines,
-        )
-
-        all_lines = (
-            list(front_ocr_lines)
-            + list(back_ocr_lines)
-        )
-
+        front_document, extracted_nric = evaluate_mykad_front(front_ocr_lines)
+        back_document = evaluate_mykad_back(back_ocr_lines)
+        all_lines = list(front_ocr_lines) + list(back_ocr_lines)
+        failure_status = failure_message = None
         if not back_ocr_lines:
-            return build_verification_response(
-                verified=False,
-                status="OCR_FAILED",
-                message=(
-                    "No readable text was detected "
-                    "on the MyKad back image."
-                ),
-                document_type="mykad",
-                images_quality=images_quality,
-                processed_images=processed_images,
-            )
-
-        ocr_confidence = (
-            average_ocr_confidence(
-                all_lines
-            )
-        )
-
-        documents = {
-            "mykad_front": front_document,
-            "mykad_back": back_document,
-        }
-
-        extracted_lines = (
-            readable_ocr_lines(
-                front_ocr_lines
-            )
-            + readable_ocr_lines(
-                back_ocr_lines
-            )
-        )
-
-        if not front_document.passed:
-            return build_verification_response(
-                verified=False,
-                status="INVALID_DOCUMENT",
-                message=(
-                    "The front image does not "
-                    "appear to be a valid MyKad."
-                ),
-                document_type="mykad",
-                images_quality=images_quality,
-                documents=documents,
-                comparison=comparison,
-                ocr_average_confidence=round(
-                    ocr_confidence,
-                    4,
-                ),
-                extracted_document_number_masked=(
-                    mask_document_number(
-                        extracted_nric
-                    )
-                ),
-                extracted_text_lines=(
-                    extracted_lines or None
-                ),
-                processed_images=processed_images,
-            )
-
-        if not back_document.passed:
-            return build_verification_response(
-                verified=False,
-                status="MANUAL_REVIEW",
-                message=(
-                    "The front image is recognised, "
-                    "but the back image could not be "
-                    "confirmed confidently. Send the "
-                    "submission for manual review."
-                ),
-                document_type="mykad",
-                images_quality=images_quality,
-                documents=documents,
-                comparison=comparison,
-                ocr_average_confidence=round(
-                    ocr_confidence,
-                    4,
-                ),
-                extracted_document_number_masked=(
-                    mask_document_number(
-                        extracted_nric
-                    )
-                ),
-                extracted_text_lines=(
-                    extracted_lines or None
-                ),
-                processed_images=processed_images,
-            )
-
-        if (
-            comparison.document_number_match
-            and comparison.name_match
-            and ocr_confidence
-            >= settings.min_ocr_confidence
-        ):
-            return build_verification_response(
-                verified=True,
-                status="VERIFIED",
-                message=(
-                    "The MyKad front and back "
-                    "images were confirmed, and "
-                    "the submitted details match."
-                ),
-                document_type="mykad",
-                images_quality=images_quality,
-                documents=documents,
-                comparison=comparison,
-                ocr_average_confidence=round(
-                    ocr_confidence,
-                    4,
-                ),
-                extracted_document_number_masked=(
-                    mask_document_number(
-                        extracted_nric
-                    )
-                ),
-                extracted_text_lines=(
-                    extracted_lines or None
-                ),
-                processed_images=processed_images,
-            )
-
-        if (
-            comparison.document_number_match
-            and comparison.name_similarity
-            >= settings.manual_review_name_score
-        ):
-            status = "MANUAL_REVIEW"
-            message = (
-                "The NRIC matches, but the name "
-                "or OCR result needs manual review."
-            )
-
-        else:
-            status = "DETAILS_MISMATCH"
-            message = (
-                "The MyKad information does not "
-                "match the entered details."
-            )
-
-        return build_verification_response(
-            verified=False,
-            status=status,
-            message=message,
-            document_type="mykad",
+            failure_status = "OCR_FAILED"
+            failure_message = "No readable text was detected on the MyKad back image."
+        elif not front_document.passed:
+            failure_status = "INVALID_DOCUMENT"
+            failure_message = "The front image does not appear to be a valid MyKad."
+        elif not back_document.passed:
+            failure_status = "MANUAL_REVIEW"
+            failure_message = "The back image could not be confirmed confidently."
+        return extraction_result(
+            images=[front_image, back_image], lines=all_lines, document_type="mykad",
             images_quality=images_quality,
-            documents=documents,
-            comparison=comparison,
-            ocr_average_confidence=round(
-                ocr_confidence,
-                4,
-            ),
-            extracted_document_number_masked=(
-                mask_document_number(
-                    extracted_nric
-                )
-            ),
-            extracted_text_lines=extracted_lines or None,
-            processed_images=processed_images,
+            documents={"mykad_front": front_document, "mykad_back": back_document},
+            extracted_name=extract_document_name(front_ocr_lines), extracted_number=extracted_nric,
+            processed_images=processed_images, success_status="VERIFIED",
+            failure_status=failure_status, failure_message=failure_message, require_confidence=True,
         )
 
     if normalized_document_type == "passport":
-        if not entered_passport_number or not entered_passport_number.strip():
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Passport number is required."
-                ),
-            )
-
-        entered_passport_number = (
-            entered_passport_number.strip()
-        )
-
         if not passport_image:
             raise HTTPException(
                 status_code=422,
@@ -827,139 +703,15 @@ async def verify_document(
                 processed_images=processed_images,
             )
 
-        passport_document, passport_number = (
-            evaluate_passport(
-                lines=passport_ocr_lines,
-                entered_passport_number=(
-                    entered_passport_number
-                ),
-            )
-        )
-
-        comparison = compare_passport_details(
-            entered_name=entered_name,
-            entered_passport_number=(
-                entered_passport_number
-            ),
-            extracted_passport_number=(
-                passport_number
-            ),
-            lines=passport_ocr_lines,
-        )
-
-        ocr_confidence = (
-            average_ocr_confidence(
-                passport_ocr_lines
-            )
-        )
-
-        extracted_lines = readable_ocr_lines(
-            passport_ocr_lines
-        )
-
-        documents = {
-            "passport": passport_document,
-        }
-
-        if not passport_document.passed:
-            return build_verification_response(
-                verified=False,
-                status="INVALID_DOCUMENT",
-                message=(
-                    "The uploaded image does not "
-                    "appear to be a passport "
-                    "information page."
-                ),
-                document_type="passport",
-                images_quality=images_quality,
-                documents=documents,
-                comparison=comparison,
-                ocr_average_confidence=round(
-                    ocr_confidence,
-                    4,
-                ),
-                extracted_document_number_masked=(
-                    mask_document_number(
-                        passport_number
-                    )
-                ),
-                extracted_text_lines=(
-                    extracted_lines or None
-                ),
-                processed_images=processed_images,
-            )
-
-        if (
-            comparison.document_number_match
-            and comparison.name_match
-            and ocr_confidence
-            >= settings.min_ocr_confidence
-        ):
-            return build_verification_response(
-                verified=True,
-                status="VERIFIED",
-                message=(
-                    "The passport details match "
-                    "the information entered by "
-                    "the user."
-                ),
-                document_type="passport",
-                images_quality=images_quality,
-                documents=documents,
-                comparison=comparison,
-                ocr_average_confidence=round(
-                    ocr_confidence,
-                    4,
-                ),
-                extracted_document_number_masked=(
-                    mask_document_number(
-                        passport_number
-                    )
-                ),
-                extracted_text_lines=(
-                    extracted_lines or None
-                ),
-                processed_images=processed_images,
-            )
-
-        if (
-            comparison.document_number_match
-            and comparison.name_similarity
-            >= settings.manual_review_name_score
-        ):
-            status = "MANUAL_REVIEW"
-            message = (
-                "The passport number matches, "
-                "but the name or OCR confidence "
-                "requires manual review."
-            )
-
-        else:
-            status = "DETAILS_MISMATCH"
-            message = (
-                "The passport details do not "
-                "match the entered information."
-            )
-
-        return build_verification_response(
-            verified=False,
-            status=status,
-            message=message,
-            document_type="passport",
-            images_quality=images_quality,
-            documents=documents,
-            comparison=comparison,
-            ocr_average_confidence=round(
-                ocr_confidence,
-                4,
-            ),
-            extracted_document_number_masked=(
-                mask_document_number(
-                    passport_number
-                )
-            ),
-            extracted_text_lines=extracted_lines or None,
-            processed_images=processed_images,
+        passport_document, passport_number = evaluate_passport(passport_ocr_lines)
+        return extraction_result(
+            images=[decoded_passport], lines=passport_ocr_lines, document_type="passport",
+            images_quality=images_quality, documents={"passport": passport_document},
+            extracted_name=extract_document_name(passport_ocr_lines, document_type="passport"),
+            extracted_number=passport_number, processed_images=processed_images,
+            success_status="VERIFIED", require_confidence=True,
+            failure_status=None if passport_document.passed else "INVALID_DOCUMENT",
+            failure_message=None if passport_document.passed else "The image does not appear to be a passport information page.",
         )
 
     raise HTTPException(
@@ -979,8 +731,8 @@ async def verify_document(
 )
 async def verify_mykad_pdf(
     document_pdf: UploadFile = File(...),
-    entered_name: str = Form(...),
-    entered_nric: str = Form(...),
+    entered_name: str | None = Form(default=None),
+    entered_nric: str | None = Form(default=None),
 ):
     if document_pdf.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Upload a PDF containing the MyKad front and back.")
@@ -1003,30 +755,19 @@ async def verify_mykad_pdf(
         form_image = decode_image(rendered_pages[0])
         form_quality = check_image_quality(form_image)
         form_ocr_lines = run_ocr(form_image)
-        extracted_nric = extract_nric(form_ocr_lines)
-        comparison = compare_mykad_details(
-            entered_name=entered_name,
-            entered_nric=entered_nric,
-            extracted_nric=extracted_nric,
-            lines=form_ocr_lines,
-        )
-        return build_verification_response(
-            verified=False,
-            status="MANUAL_REVIEW",
-            message=(
-                "OCR inspected the single-page cancellation form and compared "
-                "identity text where readable. An authorised reviewer must "
-                "visually confirm the marked/crossed-out IC and signature; "
-                "OCR does not verify those marks."
-            ),
-            document_type="cancellation_form",
+        form_document, extracted_nric = evaluate_mykad_front(form_ocr_lines)
+        if diagnostics.current.get() is not None:
+            diagnostics.current.get().additional_checks["document_cancellation_form"] = {
+                "state": "passed" if form_document.passed else "failed",
+                "reason": "Document recognition score: " + str(form_document.score),
+            }
+        eligible = form_quality.passed and form_document.passed
+        return extraction_result(
+            images=[form_image], lines=form_ocr_lines, document_type="cancellation_form",
             images_quality={"cancellation_form": form_quality},
-            comparison=comparison,
-            ocr_average_confidence=round(
-                average_ocr_confidence(form_ocr_lines),
-                4,
-            ),
-            extracted_document_number_masked=mask_document_number(extracted_nric),
+            extracted_name=extract_document_name(form_ocr_lines), extracted_number=extracted_nric,
+            include_text=False, failure_status=None if eligible else "MANUAL_REVIEW",
+            failure_message=None if eligible else "The image or document could not be confirmed automatically.",
         )
 
     front_bytes, back_bytes = rendered_pages
@@ -1052,16 +793,6 @@ async def verify_mykad_pdf(
 
     if result.status == "VERIFIED":
         result.status = "MANUAL_REVIEW"
-        result.message = (
-            "The identity details and image quality matched. CIDB marking and "
-            "signature checks remain outside OCR."
-        )
-    else:
-        result.message = (
-            result.message
-            + " The CIDB-use cross-out, director signature, and company stamp "
-            "have not been machine-checked."
-        )
     return result
 
 
@@ -1105,45 +836,14 @@ async def verify_cancellation_form_pdf(
     form_quality = check_image_quality(form_image)
     form_ocr_lines = run_ocr(form_image)
     front_document, extracted_nric = evaluate_mykad_front(form_ocr_lines)
-    entered_name = entered_name.strip() if entered_name and entered_name.strip() else None
-    entered_nric = entered_nric.strip() if entered_nric and entered_nric.strip() else None
-    if entered_nric and not validate_nric_format(entered_nric):
-        raise HTTPException(status_code=400, detail="The entered NRIC is invalid.")
-    comparison = compare_mykad_details(
-        entered_name=entered_name or "",
-        entered_nric=entered_nric or extracted_nric or "",
-        extracted_nric=extracted_nric,
-        lines=form_ocr_lines,
-    )
-    extracted_name = extract_label_value(form_ocr_lines, ("NAMA", "NAME"))
-    if extracted_name is None and entered_name and comparison.name_match:
-        extracted_name = entered_name
-    extracted_address = extract_label_value(form_ocr_lines, ("ALAMAT", "ADDRESS"), max_lines=3)
-    identity_verified = bool(
-        form_quality.passed
-        and front_document.passed
-        and extracted_nric
-        and entered_name
-        and comparison.name_match
-        and (not entered_nric or comparison.document_number_match)
-    )
-    return build_verification_response(
-        verified=identity_verified,
-        status="MANUAL_REVIEW",
-        message="Identity and image quality passed." if identity_verified else "The image or identity fields could not be confirmed automatically.",
-        document_type="cancellation_form",
-        images_quality={"cancellation_form": form_quality},
-        documents={"mykad_front": front_document},
-        comparison=comparison,
-        ocr_average_confidence=round(
-            average_ocr_confidence(form_ocr_lines),
-            4,
-        ),
-        extracted_document_number_masked=mask_document_number(extracted_nric),
-        extracted_document_number=extracted_nric,
-        extracted_name=extracted_name,
-        extracted_address=extracted_address,
-        extracted_text_lines=readable_ocr_lines(form_ocr_lines) or None,
+    eligible = form_quality.passed and front_document.passed
+    return extraction_result(
+        images=[form_image], lines=form_ocr_lines, document_type="cancellation_form",
+        images_quality={"cancellation_form": form_quality}, documents={"mykad_front": front_document},
+        extracted_name=extract_document_name(form_ocr_lines), extracted_number=extracted_nric,
+        extracted_address=extract_label_value(form_ocr_lines, ("ALAMAT", "ADDRESS"), max_lines=3),
+        failure_status=None if eligible else "MANUAL_REVIEW",
+        failure_message=None if eligible else "The image or document could not be confirmed automatically.",
     )
 
 
@@ -1163,40 +863,12 @@ async def verify_mykad_image(
     _, image, quality = await read_and_validate_image(image_file)
     lines = run_ocr(image)
     document, extracted_nric = evaluate_mykad_front(lines)
-    entered_name = entered_name.strip() if entered_name and entered_name.strip() else None
-    entered_nric = entered_nric.strip() if entered_nric and entered_nric.strip() else None
-    if entered_nric and not validate_nric_format(entered_nric):
-        raise HTTPException(status_code=400, detail="The entered NRIC is invalid.")
-    comparison = compare_mykad_details(
-        entered_name=entered_name or "",
-        entered_nric=entered_nric or extracted_nric or "",
-        extracted_nric=extracted_nric,
-        lines=lines,
-    )
-    extracted_name = extract_label_value(lines, ("NAMA", "NAME"))
-    if extracted_name is None and entered_name and comparison.name_match:
-        extracted_name = entered_name
-    extracted_address = extract_label_value(lines, ("ALAMAT", "ADDRESS"), max_lines=3)
-    identity_verified = bool(
-        quality.passed
-        and document.passed
-        and extracted_nric
-        and entered_name
-        and comparison.name_match
-        and (not entered_nric or comparison.document_number_match)
-    )
-    return build_verification_response(
-        verified=identity_verified,
-        status="MANUAL_REVIEW",
-        message="Identity and image quality passed." if identity_verified else "The image or identity fields could not be confirmed automatically.",
-        document_type="mykad",
-        images_quality={"mykad_image": quality},
-        documents={"mykad_front": document},
-        comparison=comparison,
-        ocr_average_confidence=round(average_ocr_confidence(lines), 4),
-        extracted_document_number_masked=mask_document_number(extracted_nric),
-        extracted_document_number=extracted_nric,
-        extracted_name=extracted_name,
-        extracted_address=extracted_address,
-        extracted_text_lines=readable_ocr_lines(lines) or None,
+    eligible = quality.passed and document.passed
+    return extraction_result(
+        images=[image], lines=lines, document_type="mykad",
+        images_quality={"mykad_image": quality}, documents={"mykad_front": document},
+        extracted_name=extract_document_name(lines), extracted_number=extracted_nric,
+        extracted_address=extract_label_value(lines, ("ALAMAT", "ADDRESS"), max_lines=3),
+        failure_status=None if eligible else "MANUAL_REVIEW",
+        failure_message=None if eligible else "The image or document could not be confirmed automatically.",
     )

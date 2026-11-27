@@ -1,10 +1,22 @@
 ﻿# CIDB OCR service
 
-The OCR service is called by the portal's Cron2 worker. It extracts a readable customer name, NRIC, and address where present, and uses image blur as the image-quality rejection gate. The CIDB form's cross-out, signature, and stamp are not OCR checks.
+The OCR service is called through the existing private API. PaddleOCR extracts identity text and the existing blur/document checks remain in place. Automatic approval additionally requires a visible cross-out (CIDB wording optional), a customer-added signature, and an OCR-supported name and identification number. Company stamps are not checked.
 
-The worker stores each document result in `portal_ticket_documents.ocr_status`. For a readable identity match it records `manual_review` for the frontend and `identity_check_verified=true`; the verified identity can then pass the automatic RPA gate. A mismatch or unreadable document does not pass that gate. No additional ticket workflow statuses are created.
+Identity is extracted from the submitted document, without comparison to customer-provided values. The same HTTP response returns `extracted_name` and the full `extracted_document_number` alongside `verified`, `status`, and `message`. These existing response fields are populated wherever extraction succeeds, including when visual verification fails. Missing values are omitted using the existing response serialization. There is no new outbound RPA API call. The portal's `/api/ocr/verify-document` proxy passes this response through unchanged.
+
+Legacy `entered_name`, `entered_nric`, and `entered_passport_number` fields remain accepted but are optional and ignored. The optional `comparison` result is no longer populated. Extraction uses labelled fields, MyKad number/name order, and passport MRZ evidence; conflicting candidates are withheld. Unusual layouts and OCR mistakes still require real-document evaluation; an extracted value is not a guarantee of accuracy.
+
+The worker stores each document result in `portal_ticket_documents.ocr_status`. A complete verification can be recorded as `manual_review` for the frontend with `identity_check_verified=true`; that boolean controls the automatic RPA gate. Missing, uncertain or failed visual checks never set it true. No additional ticket workflow statuses are created.
+
+**Visual backend selection:** `VISUAL_BACKEND=opencv_crossout` enables the [OpenCV cross-out testing stage](OPENCV_CROSS_OUT.md) without model/reference assets. It never approves documents: signature validation is not implemented in this backend. The default `VISUAL_BACKEND=onnx` still requires a validated local package configured through `VISUAL_MANIFEST_PATH`; missing assets return `INTERNAL_ERROR` and `verified=false`, without automatic fallback. Read [visual validation deployment, package format and limitations](VISUAL_VALIDATION.md) before deploying. Incoming documents remain in the existing receiving flow; no training-data collection or additional upload storage is introduced.
 
 ## Local setup
+
+For the portal's admin/manager **OCR Testing** page, opt-in per-check diagnostics,
+and the separate three-field RPA notification, see
+[portal testing and result delivery](../docs/ocr-testing-and-result-delivery.md).
+The page does not create production jobs or send notifications. Notifications
+on production paths are separately enabled; database status storage is unchanged.
 
 Use Python 3.10–3.12. From `ocr/` create a virtual environment, install `requirements.txt`, and copy `.env.example` to `.env`. Set `API_KEY` for the OCR service and configure the same value as `OCR_API_KEY` in the portal environment. The service checks the `X-API-Key` header whenever `API_KEY` is set.
 
@@ -36,11 +48,14 @@ When the portal and OCR service are on separate hosts, use the private HTTPS URL
 
 The worker accepts CLOG `New Email` and `Reply Mail` attachments. Agent `ReplyTo Mail` attachments are stored in the conversation but are not OCR inputs.
 
+Database schemas, result storage, and status mappings are unchanged. The separate Cron2 direct-to-RPA-Hub workflow also remains unchanged: it fills missing stored identity fields when eligible and otherwise prefers stored customer details. The extraction-only change applies to OCR API responses; it does not replace existing stored details or alter that separate Hub payload.
+
 ## Routes used by the worker
 
-- `POST /api/verify-cancellation-form-pdf` — one-page PDF, with optional `entered_name` and `entered_nric`.
-- `POST /api/verify-mykad-pdf` — two-page MyKad PDF, front then back, with `entered_name` and `entered_nric`.
-- `POST /api/verify-mykad-image` — one MyKad image, with optional expected name and NRIC.
+- `POST /api/verify-cancellation-form-pdf` — one-page PDF.
+- `POST /api/verify-mykad-pdf` — one-page form or two-page MyKad PDF, front then back.
+- `POST /api/verify-mykad-image` — one MyKad image.
+- `POST /api/verify-document` — `document_type=mykad` with `mykad_front` and `mykad_back`, or `document_type=passport` with `passport_image`.
 
 Every route accepts multipart form data and requires `X-API-Key` when the service has `API_KEY` configured. The portal worker downloads files from CLOG and sends them to these routes. Do not send real customer documents to a public test instance or include full NRICs in logs.
 
@@ -49,8 +64,6 @@ Every route accepts multipart form data and requires `X-API-Key` when the servic
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/verify-cancellation-form-pdf" \
   -H "X-API-Key: $OCR_API_KEY" \
-  -F "entered_name=TEST USER" \
-  -F "entered_nric=900101101234" \
   -F "document_pdf=@cancellation-form.pdf;type=application/pdf"
 ```
 

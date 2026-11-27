@@ -26,7 +26,7 @@ Use `--crm-id=CRM-... --backlog` only for an explicitly scoped historical repair
 
 Run `php bin/cron_runner.php --cron2`. Cron2 checks eligible individual cancellation tickets for customer documents dated today, including customer `Reply Mail` rows that CLOG has marked Closed. Use `--crm-id=CRM-... --backlog` only for an explicitly scoped historical reprocess. The worker imports files by their source email IDs and invokes OCR in the same run when OCR is enabled.
 
-OCR extracts name, NRIC, and address where readable and checks image blur. Identity and image-quality success is recorded on document rows as `ocr_status='manual_review'` for frontend display, with `identity_check_verified=true`. OCR does not claim to verify signature, CIDB-use markings, or company stamps. Identity mismatches and unreadable documents do not pass the automatic RPA gate.
+OCR extracts name, NRIC, and address where readable and checks image blur. The same API response returns document-derived identity; customer-provided identity is no longer compared. Complete verification is recorded on document rows as `ocr_status='manual_review'` for frontend display, with `identity_check_verified=true`. That boolean now additionally requires a visible cross-out and customer-added signature; CIDB wording is optional. Missing visual assets, uncertain marks, missing identity and unreadable documents do not pass the automatic RPA gate. Company stamps are not checked. See [visual validation](../ocr/VISUAL_VALIDATION.md) for deployment prerequisites and limitations.
 
 ## RPA cancellation gate
 

@@ -1,0 +1,22 @@
+{
+  "format_version": 1,
+  "release_id": "REPLACE_WITH_VALIDATED_RELEASE",
+  "evaluation_id": "REPLACE_WITH_HELD_OUT_EVALUATION_ID",
+  "model": "model.onnx",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "labels": ["cross_out", "customer_signature", "embedded_signature", "mykad_front", "mykad_back", "passport"],
+  "input_size": 416,
+  "output_name": "REPLACE_WITH_EXPORTED_BBOX_OUTPUT_NAME",
+  "mean": [0.485, 0.456, 0.406],
+  "std": [0.229, 0.224, 0.225],
+  "candidate_threshold": 0.25,
+  "present_threshold": 0.85,
+  "references": [
+    {
+      "kind": "mykad_back",
+      "image": "references/REPLACE_WITH_UNMARKED_REFERENCE.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "embedded_signatures": [[0.4, 0.55, 0.65, 0.72]]
+    }
+  ]
+}

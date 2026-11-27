@@ -127,67 +127,19 @@ def average_ocr_confidence(
     return sum(confidences) / len(confidences)
 
 
-def extract_nric(
-    lines: Sequence[OCRLine],
-) -> str | None:
-    text = joined_ocr_text(lines)
-
-    match = NRIC_REGEX.search(text)
-
-    if match:
-        return format_nric(match.group(0))
-
-    # OCR sometimes removes separators completely.
-    compact_digits = re.findall(
-        r"\b\d{12}\b",
-        text,
-    )
-
-    if compact_digits:
-        return format_nric(compact_digits[0])
-
-    return None
+def extract_nric(lines: Sequence[OCRLine]) -> str | None:
+    from .identity_extraction import extract_nric_value
+    return extract_nric_value(lines)
 
 
 def extract_passport_number(
     lines: Sequence[OCRLine],
     entered_passport_number: str | None = None,
 ) -> str | None:
-    raw_text = joined_ocr_text(lines).upper()
-    compact_text = normalize_document_number(raw_text)
-
-    entered_normalized = normalize_document_number(
-        entered_passport_number
-    )
-
-    # Most reliable method during verification:
-    # check whether the entered number appears in OCR output.
-    if (
-        entered_normalized
-        and entered_normalized in compact_text
-    ):
-        return entered_normalized
-
-    candidates = PASSPORT_REGEX.findall(
-        raw_text
-    )
-
-    ignored_values = {
-        "MALAYSIA",
-        "PASSPORT",
-        "NATIONALITY",
-        "IDENTITY",
-    }
-
-    for candidate in candidates:
-        normalized_candidate = (
-            normalize_document_number(candidate)
-        )
-
-        if normalized_candidate not in ignored_values:
-            return normalized_candidate
-
-    return None
+    # Retain the legacy argument for internal compatibility; never use it as
+    # an extraction hint or a fallback for unreadable document text.
+    from .identity_extraction import extract_passport_value
+    return extract_passport_value(lines)
 
 
 def _keyword_result(
@@ -342,6 +294,17 @@ def calculate_name_similarity(
         )
         for candidate in candidates
     )
+
+
+def extract_document_name(
+    lines: Sequence[OCRLine],
+    entered_name: str | None = None,
+    *,
+    document_type: str = "mykad",
+) -> str | None:
+    # The legacy entered_name parameter is accepted but intentionally ignored.
+    from .identity_extraction import extract_name_value
+    return extract_name_value(lines, document_type)
 
 
 def compare_mykad_details(

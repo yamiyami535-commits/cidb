@@ -4,6 +4,7 @@ if (PHP_SAPI === 'cli-server') { $static = realpath(__DIR__ . parse_url($_SERVER
 require dirname(__DIR__) . '/src/bootstrap.php';
 require dirname(__DIR__) . '/src/RpaClient.php';
 require dirname(__DIR__) . '/src/OcrVerificationClient.php';
+require_once dirname(__DIR__) . '/src/OcrResultDelivery.php';
 require dirname(__DIR__) . '/src/RpaSubmission.php';
 require dirname(__DIR__) . '/src/request-result.php';
 require dirname(__DIR__) . '/src/RequestHistory.php';
@@ -16,6 +17,10 @@ header('X-Content-Type-Options: nosniff'); header('X-Frame-Options: DENY'); head
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/'; $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
 try {
+    if ($path === '/ocr-testing' || $path === '/ocr-testing/run') {
+        require dirname(__DIR__) . '/src/ocr-testing-routes.php';
+        exit;
+    }
     if ($path === '/api/ocr/verify-document' && $method === 'POST') {
         header('Content-Type: application/json; charset=utf-8');
         header('Cache-Control: no-store');
@@ -47,6 +52,10 @@ try {
             exit;
         }
         $result = (new OcrVerificationClient())->verify($_POST, $_FILES);
+        if (isset($result['body']['verified']) && !in_array($result['body']['status'] ?? '', ['INVALID_REQUEST', 'OCR_API_UNAVAILABLE'], true)) {
+            $correlation = OcrResultDelivery::correlation($_SERVER['HTTP_X_CORRELATION_ID'] ?? null);
+            (new OcrResultDelivery())->deliver($result['body'], 'api', $correlation);
+        }
         http_response_code($result['http_status']);
         echo json_encode($result['body'], JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;

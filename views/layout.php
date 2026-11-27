@@ -1,3 +1,4 @@
+<?php require_once dirname(__DIR__).'/src/OcrTestingAccess.php'; $canTestOcr = OcrTestingAccess::allowed(current_user()); ?>
 <!doctype html>
 <html lang="en">
 <head>
@@ -14,7 +15,7 @@
 </head>
 <body class="<?= !empty($ticketWorkspace) ? 'ticket-workspace has-ticket-sidebar' : (($mainClass ?? '') === 'portal-main' ? 'has-ticket-sidebar' : '') ?>">
 <header class="topbar"><a class="brand" href="/" aria-label="CIDB Malaysia Digital Services home"><img class="cidb-logo" src="/assets/images/CIDB-Logo.png" alt="CIDB Malaysia"></a><?php if (current_user()): ?><nav class="top-navigation" aria-label="Main navigation"><a href="/"<?= ($activeTicketPage ?? '') === 'service' ? ' aria-current="page"' : '' ?>>CIDB Service Request</a></nav><?php endif; ?><div class="partner"><img class="daythree-logo daythree-logo-header" src="/assets/images/daythree-logo-1.png" alt="Daythree"></div>
-<?php if (current_user()): ?><div class="account"><span><?= e(current_user()['username']) ?></span><form method="post" action="/logout"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><button class="signout" type="submit">Sign out</button></form></div><?php endif; ?>
+<?php if (current_user()): ?><div class="account"><?php if ($canTestOcr): ?><a href="/ocr-testing"<?= ($activeTicketPage ?? '') === 'ocr-testing' ? ' aria-current="page"' : '' ?>>OCR Testing</a><?php endif; ?><span><?= e(current_user()['username']) ?></span><form method="post" action="/logout"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><button class="signout" type="submit">Sign out</button></form></div><?php endif; ?>
 </header>
 <main class="<?= e($mainClass ?? '') ?>"><?= $content ?? '' ?></main>
 <footer><span class="footer-brand"><img class="cidb-logo cidb-logo-footer" src="/assets/images/CIDB-Logo.png" alt="CIDB Malaysia"><span>© <?= date('Y') ?></span></span><span>Secure digital services <i aria-hidden="true"></i></span></footer>

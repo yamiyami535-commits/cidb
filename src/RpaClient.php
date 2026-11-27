@@ -106,16 +106,41 @@ final class RpaClient
 
     public function send(array $payload): array
     {
+        return $this->sendRequest($payload);
+    }
+
+    /** Separate result call; existing workflow payloads and send() are unchanged. */
+    public function sendOcrResult(array $payload, string $correlationId, string $idempotencyKey): array
+    {
+        $url = parse_url(env_value('RPA_BOT_ENDPOINT'));
+        if (!is_array($url) || empty($url['host']) || isset($url['user']) || isset($url['pass'])
+            || (strtolower((string)($url['scheme'] ?? '')) !== 'https'
+                && !(strtolower((string)($url['scheme'] ?? '')) === 'http'
+                    && in_array(strtolower($url['host']), ['localhost', '127.0.0.1', '::1', '[::1]'], true)))) {
+            throw new RuntimeException('OCR result delivery requires a secure RPA endpoint.');
+        }
+        foreach ([$correlationId, $idempotencyKey] as $value) {
+            if (!preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $value)) throw new InvalidArgumentException('Invalid result correlation header.');
+        }
+        return $this->sendRequest($payload, true, [
+            'X-OCR-Result-Type: identity-extraction-v1',
+            'X-Correlation-ID: ' . $correlationId,
+            'Idempotency-Key: ' . $idempotencyKey,
+        ], max(1000, min(30000, (int)env_value('OCR_RPA_RESULT_TIMEOUT_MS', '5000'))));
+    }
+
+    private function sendRequest(array $payload, bool $verifyTls = false, array $extraHeaders = [], ?int $timeoutMs = null): array
+    {
         $endpoint = env_value('RPA_BOT_ENDPOINT');
         $key = env_value('RPA_BOT_API_KEY');
         if (!filter_var($endpoint, FILTER_VALIDATE_URL) || $key === '') throw new RuntimeException('RPA integration is not configured.');
         $ch = curl_init($endpoint);
         if ($ch === false) throw new RuntimeException('Unable to start the RPA request.');
         curl_setopt_array($ch, [CURLOPT_POST=>true, CURLOPT_POSTFIELDS=>json_encode($payload, JSON_THROW_ON_ERROR), CURLOPT_RETURNTRANSFER=>true,
-            CURLOPT_SSL_VERIFYPEER=>false, CURLOPT_SSL_VERIFYHOST=>0,
-            CURLOPT_HTTPHEADER=>['Content-Type: application/json','Accept: */*','X-API-Key: '.$key],
+            CURLOPT_SSL_VERIFYPEER=>$verifyTls, CURLOPT_SSL_VERIFYHOST=>$verifyTls ? 2 : 0,
+            CURLOPT_HTTPHEADER=>array_merge(['Content-Type: application/json','Accept: */*','X-API-Key: '.$key], $extraHeaders),
             CURLOPT_CONNECTTIMEOUT_MS=>max(1000,(int)env_value('RPA_BOT_CONNECT_TIMEOUT_MS','5000')),
-            CURLOPT_TIMEOUT_MS=>max(1000,(int)env_value('RPA_BOT_TIMEOUT_MS','15000'))]);
+            CURLOPT_TIMEOUT_MS=>$timeoutMs ?? max(1000,(int)env_value('RPA_BOT_TIMEOUT_MS','15000'))]);
         $body = curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); $curlError = curl_error($ch); curl_close($ch);
         if ($body === false) return ['http_status'=>$status ?: null,'raw'=>'','parsed'=>null,'error'=>'RPA network request failed: '.$curlError];
         $parsed = json_decode((string)$body, true);

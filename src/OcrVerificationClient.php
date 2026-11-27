@@ -17,30 +17,35 @@ final class OcrVerificationClient
             return $this->response(400, 'INVALID_REQUEST', 'Choose MyKad or passport verification.');
         }
 
-        $enteredName = trim((string)($fields['entered_name'] ?? ''));
-        if ($enteredName === '' || mb_strlen($enteredName) > 200) {
-            return $this->response(400, 'INVALID_REQUEST', 'Enter the name shown on the identity document.');
-        }
+        // Identity comes from the document. Legacy entered_* fields are
+        // accepted by the public endpoint but do not constrain OCR extraction.
+        $multipart = ['document_type' => $documentType];
+        $requiredFiles = $documentType === 'mykad'
+            ? ['mykad_front', 'mykad_back']
+            : ['passport_image'];
 
-        $multipart = [
-            'document_type' => $documentType,
-            'entered_name' => $enteredName,
+        return $this->upload($multipart, $requiredFiles, $files, '/api/verify-document', false);
+    }
+
+    /** Testing uses the same OCR endpoints; no ticket/job or RPA side effects. */
+    public function verifyForTesting(string $mode, array $files): array
+    {
+        $modes = [
+            'mykad' => ['/api/verify-document', ['mykad_front', 'mykad_back'], ['document_type'=>'mykad']],
+            'passport' => ['/api/verify-document', ['passport_image'], ['document_type'=>'passport']],
+            'image' => ['/api/verify-mykad-image', ['image_file'], []],
+            'form_pdf' => ['/api/verify-cancellation-form-pdf', ['document_pdf'], []],
+            'mykad_pdf' => ['/api/verify-mykad-pdf', ['document_pdf'], []],
         ];
-        if ($documentType === 'mykad') {
-            $nric = trim((string)($fields['entered_nric'] ?? ''));
-            if ($nric === '' || mb_strlen($nric) > 40) {
-                return $this->response(400, 'INVALID_REQUEST', 'Enter a valid NRIC.');
-            }
-            $multipart['entered_nric'] = $nric;
-            $requiredFiles = ['mykad_front', 'mykad_back'];
-        } else {
-            $passportNumber = trim((string)($fields['entered_passport_number'] ?? ''));
-            if ($passportNumber === '' || mb_strlen($passportNumber) > 40) {
-                return $this->response(400, 'INVALID_REQUEST', 'Enter the passport number.');
-            }
-            $multipart['entered_passport_number'] = $passportNumber;
-            $requiredFiles = ['passport_image'];
+        if (!isset($modes[$mode])) {
+            return $this->response(400, 'INVALID_REQUEST', 'Choose a supported document mode.');
         }
+        [$route, $required, $fields] = $modes[$mode];
+        return $this->upload($fields, $required, $files, $route, true);
+    }
+
+    private function upload(array $multipart, array $requiredFiles, array $files, string $route, bool $testing): array
+    {
 
         foreach ($requiredFiles as $fieldName) {
             $upload = $files[$fieldName] ?? null;
@@ -53,14 +58,15 @@ final class OcrVerificationClient
                 return $this->response(400, 'INVALID_REQUEST', 'The uploaded image could not be read.');
             }
             $size = (int)($upload['size'] ?? 0);
-            $maxBytes = max(1, (int)env_value('OCR_MAX_FILE_SIZE_MB', '8')) * 1024 * 1024;
+            $pdf = $testing && $fieldName === 'document_pdf';
+            $maxBytes = max(1, (int)env_value($pdf ? 'OCR_MAX_PDF_SIZE_MB' : 'OCR_MAX_FILE_SIZE_MB', $pdf ? '16' : '8')) * 1024 * 1024;
             if ($size < 1 || $size > $maxBytes) {
                 return $this->response(413, 'INVALID_REQUEST', 'Each identity image must be smaller than the configured upload limit.');
             }
 
             $mimeType = (new finfo(FILEINFO_MIME_TYPE))->file($path);
-            if (!is_string($mimeType) || !in_array($mimeType, self::ALLOWED_MIME_TYPES, true)) {
-                return $this->response(400, 'INVALID_REQUEST', 'Upload a JPEG, PNG, or WebP image.');
+            if (!is_string($mimeType) || !in_array($mimeType, $pdf ? ['application/pdf'] : self::ALLOWED_MIME_TYPES, true)) {
+                return $this->response(400, 'INVALID_REQUEST', $pdf ? 'Upload a supported PDF.' : 'Upload a JPEG, PNG, or WebP image.');
             }
 
             $multipart[$fieldName] = new CURLFile(
@@ -70,7 +76,8 @@ final class OcrVerificationClient
             );
         }
 
-        $baseUrl = rtrim(env_value('OCR_SERVICE_URL', 'http://127.0.0.1:8001'), '/');
+        $serviceUrl = env_value('OCR_SERVICE_URL', 'http://127.0.0.1:8001');
+        $baseUrl = rtrim($testing ? (env_value('OCR_TEST_SERVICE_URL') ?: $serviceUrl) : $serviceUrl, '/');
         $urlParts = parse_url($baseUrl);
         if (!is_array($urlParts)
             || !in_array(strtolower((string)($urlParts['scheme'] ?? '')), ['http', 'https'], true)
@@ -83,21 +90,23 @@ final class OcrVerificationClient
         }
 
         $isLoopback = in_array(strtolower((string)$urlParts['host']), ['127.0.0.1', 'localhost', '::1'], true);
-        $apiKey = env_value('OCR_API_KEY');
+        $apiKey = $testing ? (env_value('OCR_TEST_API_KEY') ?: env_value('OCR_API_KEY')) : env_value('OCR_API_KEY');
         if ((strtolower((string)$urlParts['scheme']) !== 'https' && !$isLoopback)
             || (!$isLoopback && $apiKey === '')) {
             return $this->response(503, 'OCR_API_UNAVAILABLE', 'OCR verification is not configured securely.');
         }
 
-        $endpoint = str_ends_with($baseUrl, '/api/verify-document')
-            ? $baseUrl
-            : $baseUrl . '/api/verify-document';
+        $baseUrl = str_ends_with($baseUrl, '/api/verify-document') ? substr($baseUrl, 0, -strlen('/api/verify-document')) : $baseUrl;
+        $endpoint = $baseUrl . $route;
         $curl = curl_init($endpoint);
         if ($curl === false) {
             return $this->response(503, 'OCR_API_UNAVAILABLE', 'OCR verification is temporarily unavailable.');
         }
 
         $headers = ['Accept: application/json'];
+        if ($testing) {
+            $headers[] = 'X-OCR-Diagnostics: 1';
+        }
         if ($apiKey !== '') {
             $headers[] = 'X-API-Key: ' . $apiKey;
         }

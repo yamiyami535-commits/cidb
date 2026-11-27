@@ -14,8 +14,8 @@ This checklist describes the scheduled individual-cancellation workflow. Use red
 
 1. Cron1 runs `php bin/cron_runner.php`. It reads Open CLOG records for today in `CLOG_TIMEZONE`, filters to Individual ID cancellations, excludes company records and agent `ReplyTo Mail`, and stores customer email/document metadata.
 2. Cron2 runs `php bin/cron_runner.php --cron2`. It checks today's customer `New Email` / `Reply Mail` attachments, including customer replies CLOG marks Closed, then runs OCR in the same invocation.
-3. OCR checks blur and extracts name, NRIC, and address where readable. It records OCR state on each document, without adding ticket workflow statuses.
-4. Identity mismatch or unreadable documents remain out of the automatic RPA gate. If all customer documents have verified identity and the case is an Individual cancellation, the worker directly inserts the exact nine-field `Email Cancel` payload into RPA Hub.
+3. OCR preserves blur checks and name/NRIC/address extraction. Before approval, the visual gate also requires a cross-out and customer-added signature across all accepted pages. Verify the local model/reference package first; missing assets return an unverified error. It records OCR state on each document without adding ticket workflow statuses. See [visual validation tests](../ocr/VISUAL_VALIDATION.md).
+4. Missing extracted identity, failed marks, or unreadable documents remain out of the automatic RPA gate. Entered identity values are ignored; the OCR API returns document-derived identity with its outcome. If all customer documents have verified identity and the case is an Individual cancellation, the unchanged worker directly inserts the exact nine-field `Email Cancel` payload into RPA Hub using its existing stored-identity rules.
 
 Use `--crm-id=CRM-... --backlog` only for a specific historical repair. Add `--skip-rpa-dispatch` to Cron1 when repairing ticket/thread metadata without sending an RPA request. Do not run unrestricted backlog as a scheduled task.
 

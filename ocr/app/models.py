@@ -54,6 +54,9 @@ class VerificationResponse(BaseModel):
     status: str
     message: str
 
+    # Included only when the private caller opts in to diagnostic observations.
+    diagnostics: Optional[dict] = None
+
     document_type: Optional[str] = None
 
     images_quality: Optional[
@@ -70,8 +73,8 @@ class VerificationResponse(BaseModel):
 
     extracted_document_number_masked: Optional[str] = None
 
-    # Full document number is returned only to the private portal worker so it
-    # can complete an otherwise-missing identity field for a verified case.
+    # Document-derived identity returned to the caller through the existing API.
+    # Extraction alone does not imply verification; callers must check verified.
     extracted_document_number: Optional[str] = None
     extracted_name: Optional[str] = None
     extracted_address: Optional[str] = None

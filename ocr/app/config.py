@@ -1,4 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
+from typing import Literal
 
 
 class Settings(BaseSettings):
@@ -17,6 +19,15 @@ class Settings(BaseSettings):
     min_ocr_confidence: float = 0.55
     min_name_similarity: float = 75.0
     manual_review_name_score: float = 60.0
+
+    # Explicit selection; a broken ONNX package never falls back to heuristics.
+    visual_backend: Literal["onnx", "opencv_crossout"] = "onnx"
+    # Local visual model package. Missing/invalid assets never permit approval.
+    visual_manifest_path: str = ""
+    visual_threads: int = Field(default=2, ge=1, le=8)
+    visual_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    visual_tile_size: int = Field(default=1024, ge=256, le=2048)
+    visual_max_tiles: int = Field(default=32, ge=1, le=128)
 
     # CORS settings
     allowed_origins: str = (

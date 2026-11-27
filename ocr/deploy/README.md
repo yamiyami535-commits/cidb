@@ -77,8 +77,12 @@ The worker sends the mapped customer name and NRIC, plus the eligible CLOG
 customer attachment. It stores a limited OCR summary and extracts name, NRIC,
 and address where readable. `ocr_status='manual_review'` is the existing
 document status shown in the frontend; a verified identity can pass the
-automatic RPA gate. The OCR service does not check the CIDB-use cross-out,
-signature, or company stamp.
+automatic RPA gate only after the visual requirements also pass. Configure and
+validate the local model/reference package described in
+[`VISUAL_VALIDATION.md`](../VISUAL_VALIDATION.md). Model weights/reference images
+are not shipped: missing assets return `verified=false` with `INTERNAL_ERROR`.
+Cross-out lines and customer-added signatures are required; CIDB wording is
+optional and company stamps are not checked. Upload storage is unchanged.
 
 Before enabling the worker on an existing portal database, have the database
 owner apply the ticket foundation migrations in order, followed by

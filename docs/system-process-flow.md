@@ -6,7 +6,7 @@ Reviewed against the source on 13 November 2026. The application is a standalone
 | --- | --- |
 | PHP portal and PostgreSQL | Login, form requests, ticket/conversation records, attachment references, OCR/action ledgers, and staff views. |
 | CLOG MySQL and file endpoint | Source CRM/customer data, emails, activity/history, and customer attachment files. |
-| Python FastAPI / PaddleOCR | Read document text, assess image blur, and compare identity details. |
+| Python FastAPI / PaddleOCR | Extract and return document identity, assess image blur, and validate cross-outs/signatures. |
 | RPA API | Receive requests from the existing portal submission form. |
 | RPA Hub MySQL | Receive scheduled Individual cancellation and missing-attachment requests through direct database insertion. |
 | Optional IMAP reader | Record new qualifying mailbox messages as email requests and tickets. |
@@ -34,9 +34,9 @@ Repeated source records and CRM/request Hub submissions are deduplicated. Normal
 
 Cron2 runs `bin/cron_runner.php --cron2`. It rechecks eligible Individual tickets in `needs_information`, collects today's customer attachments, and promotes qualifying replies to `ready_for_ocr`. It may collect customer replies marked Closed in CLOG, while the linked ticket's effective CLOG status must still be Open. Agent attachments remain outside customer OCR inputs.
 
-Cron2 then starts `ocr_runner.php` in the same invocation. With OCR enabled, the worker queues eligible documents, downloads them, and calls the private OCR service. The service validates input, renders PDFs, preprocesses images, reads text, and evaluates identity/image quality. It does not verify signatures, CIDB cross-outs, or stamps.
+Cron2 then starts `ocr_runner.php` in the same invocation. With OCR enabled, the worker queues eligible documents, downloads them, and calls the private OCR service. The service preserves input handling, PDF rendering, PaddleOCR and identity/image-quality checks. Automatic approval additionally requires a visible cross-out and customer-added signature across the accepted pages; CIDB wording is optional. Missing visual assets, uncertain evidence or processing errors prevent approval. See [visual validation](../ocr/VISUAL_VALIDATION.md). Stamps are not checked.
 
-Document results are saved in `portal_ticket_documents`; jobs and completion events provide processing history. `ocr_status='manual_review'` can represent either confirmed or unconfirmed identity. The separate `ocr_result.identity_check_verified` flag controls eligibility. Technical failures have delayed retries; completed negative identity results need investigation or replacement. See [OCR process](ocr-process-flow.md) for routing, comparison rules, and retry limits.
+Document results are saved in `portal_ticket_documents`; jobs and completion events provide processing history. `ocr_status='manual_review'` can represent either confirmed or unconfirmed identity. The separate `ocr_result.identity_check_verified` flag controls eligibility. Technical failures have delayed retries; completed negative identity results need investigation or replacement. See [OCR process](ocr-process-flow.md) for routing, extraction rules, and retry limits.
 
 **4. Verified cancellation handoff**
 

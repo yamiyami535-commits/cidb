@@ -8,6 +8,7 @@ if (PHP_SAPI !== 'cli') {
 
 require_once dirname(__DIR__) . '/src/bootstrap.php';
 require_once dirname(__DIR__) . '/src/RpaHubDirectInserter.php';
+require_once dirname(__DIR__) . '/src/OcrResultDelivery.php';
 
 function ocr_runner_crm_id_argument(): array
 {
@@ -600,6 +601,9 @@ try {
             ]);
             $pdo->commit();
             $processed++;
+            // Separate notification after storage; delivery failure never retries OCR
+            // or changes the stored verification result / existing Hub handoff.
+            (new OcrResultDelivery())->deliver($response, 'worker', (string)$job['id']);
             $rpaResult = null;
             $attachmentCheck = $pdo->prepare("
                 SELECT count(*) AS document_count,
